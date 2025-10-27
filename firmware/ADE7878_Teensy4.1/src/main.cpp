@@ -16,7 +16,8 @@
 
 // =================== ETHERNET ===================
 byte mac[] = {0xDE,0xAD,0xBE,0xEF,0xFE,0xED};
-IPAddress localIp(192,168,10,177);
+// IPAddress localIp(192,168,200,177);
+IPAddress localIp(169,254,153,177);
 const uint16_t LOCAL_PORT = 6000;
 
 EthernetUDP Udp;
