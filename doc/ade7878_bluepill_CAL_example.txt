@@ -1,0 +1,596 @@
+// eval board notes for use with bluepill adapter board
+// note jumper pin15 and pin14 together on p13 to hold micro in reset. the loop code in micro is not correct for cf2 and cf3 and tried to pull up the pins. 
+// use external vdd from blue pill P1 connector
+// jp 72,73,74 need solder ball to connect external pins on p17 connocts spi pins to external p17. short pas closer to p17 
+// I shorted 12and 3 on j75 j76 j77 to get cf1 2 and 3 to external connector p17
+
+#include <SPI.h>
+#include "ADE7878_REG.h"
+
+void ADE7878_SPI_WRITE(uint16_t Address , uint32_t Data , uint8_t Number_of_bytes);
+uint32_t ADE7878_SPI_READ (uint16_t Address, uint8_t Number_of_bytes);
+void READ_RMS_ENERGIES_PRINT();
+void ADE7878_reg_config();
+void READ_RMS_AVERAGE_PRINT();
+
+//outputs
+#define PM_0 PB15
+#define PM_1 PA8
+#define RESET_B PB3
+#define SSB_A PA4 
+#define SSB_B PB5 
+#define SSB_C PB4 
+#define SCLK PA5
+
+//inputs
+#define CF1 PB6
+#define CF2 PB7
+#define CF3 PC14
+#define IRQ0 PB14
+#define IRQ1 PB13
+#define DREADY PB12
+
+
+//SPI_1 Chip Select pin is PA4. You can change it to the STM32 pin you want.
+//LED1=PC_13  SERIAL_TX=PA_2  I2C_SCL=PB_8  SPI_MOSI=PA_7  PWM_OUT=PB_3
+//            SERIAL_RX=PA_3  I2C_SDA=PB_9  SPI_MISO=PA_6
+//                                          SPI_SCK =PA_5
+
+// bluepill      ADE7878/7880/7816
+//PA4  > SSB_A   >> SSB
+//PB5  > SSB_B
+//PB4  > SSB_C
+
+//PA5  > sclk    >> SCLK
+//PA6  > miso    >> MISO
+//PA7  > mosi    >> MOSI
+
+//PA8  > PM1     >> PM1 
+//PB15 > PM0     >> PM0
+//PB14 > IRQ0    >> IRQ0
+//PB13 > IRQ1    >> IRQ1
+
+//PB9  > sda
+//PB8  > scl
+
+//PB3  > RSTB    >>RESETB
+//PB12 > DREADY  
+
+//PB6  > CF1     >> CF1
+//PB7  > CF2     >> CF2
+//PC14 > CF3     >> CF3
+
+byte data;
+
+int CF1_COUNT = 0;
+int CF2_COUNT = 0;
+int CF3_COUNT = 0;
+byte IRQ_STATUS = 0;
+byte DREADY_COUNT = 0;
+int last_millis = 0;
+int32_t temp;
+float cf_freq = 0;
+uint32_t last_cf_edge;
+
+double IRMS_LSB = 0;
+double VRMS_LSB = 0;
+double WATT_LSB = 0;
+double WH_LSB = 0;
+
+void setup() {
+  // put your setup code here, to run once:
+  Serial.begin(115200);
+  while(!Serial); // wait for serial poert to be open
+  
+  SPI.begin(); //Initialize the SPI_1 port.
+  SPI.setBitOrder(MSBFIRST); // Set the SPI_1 bit order
+  SPI.setDataMode(SPI_MODE3); //Set the SPI_2 data mode 0
+  SPI.setClockDivider(SPI_CLOCK_DIV32);      // Slow speed (72 / 16 = 4.5 MHz SPI_1 speed)
+  
+  pinMode(SSB_A, OUTPUT);
+  pinMode(RESET_B, OUTPUT);
+  pinMode(PM_0, OUTPUT);
+  pinMode(PM_1, OUTPUT);
+  
+
+  digitalWrite(SSB_A, HIGH);
+  digitalWrite(RESET_B, HIGH);
+
+  digitalWrite(PM_0, HIGH);
+  digitalWrite(PM_1, LOW);
+
+  digitalWrite(RESET_B, LOW);
+  delay(10);
+  digitalWrite(RESET_B, HIGH);
+
+  pinMode(CF1, INPUT);
+  pinMode(CF2, INPUT);
+  pinMode(CF3, INPUT);
+  pinMode(IRQ0, INPUT);
+  pinMode(IRQ1, INPUT);
+  pinMode(DREADY, INPUT);
+
+
+  //reset part
+
+  delay (2000);                 // not recommended use reset done
+  //while(digitalRead(IRQ1));   // wait for reset done recommended
+
+
+  //set spi port TOGGLE SSB 3 TIMES
+  digitalWrite(SSB_A, LOW);
+  delay(1);
+  digitalWrite(SSB_A, HIGH);
+  delay(1);
+  digitalWrite(SSB_A, LOW);
+  delay(1);
+  digitalWrite(SSB_A, HIGH);
+  delay(1);
+  digitalWrite(SSB_A, LOW);
+  delay(1);
+  digitalWrite(SSB_A, HIGH);
+
+  
+  delay(1000);
+  
+  //ADE7878_SPI_WRITE(STATUS0,ADE7878_SPI_READ(STATUS0, 4),4);   //clr IRQ
+  //ADE7878_SPI_WRITE(STATUS1,ADE7878_SPI_READ(STATUS1, 4),4);   //clr IRQ
+  //ADE7878_CF_TEST();
+  //while(1);
+  ADE7878_reg_config();
+  //attachInterrupt(digitalPinToInterrupt(DREADY),dready_irq,FALLING); // response about 5.2us
+   attachInterrupt(digitalPinToInterrupt(CF1),CF1_irq,FALLING); // response about 5.2us
+   attachInterrupt(digitalPinToInterrupt(CF2),CF2_irq,FALLING); // response about 5.2us
+   attachInterrupt(digitalPinToInterrupt(CF3),CF3_irq,FALLING); // response about 5.2us
+  //attachInterrupt(digitalPinToInterrupt(IRQ0),IRQ0_irq,FALLING); // response about 5.2us
+  //attachInterrupt(digitalPinToInterrupt(IRQ1),IRQ1_irq,FALLING); // response about 5.2us
+   
+}
+
+
+void dready_irq(){
+ DREADY_COUNT++;
+}
+
+void CF1_irq(){
+  CF1_COUNT++;
+  cf_freq = 1 / ((micros() - last_cf_edge) / 1000000.00);
+  last_cf_edge = micros();
+}
+
+void CF2_irq(){
+ CF2_COUNT++;
+}
+
+void CF3_irq(){
+ CF3_COUNT++;
+}
+
+void IRQ0_irq(){
+ ADE7878_SPI_WRITE(STATUS0,ADE7878_SPI_READ(STATUS0, 4),4);   // read and clear irq
+}
+
+void IRQ1_irq(){
+ ADE7878_SPI_WRITE(STATUS1,ADE7878_SPI_READ(STATUS1, 4),4);  // read and clear irq
+ 
+}
+
+
+
+void loop() {
+     calibrate_ade7878();
+   
+}
+
+
+
+void calibrate_ade7878() {
+
+  delay(10000); //wait for RMS to settle
+
+  // enter values
+  uint16_t V_TEST = 220;//volts RMS
+  uint16_t I_TEST = 10;//Amps RMS
+  double Power_factor = 1;
+  int meter_constant = 1000;  //1000 imp/Kwh for cf output rate
+  int Line_Freq = 50;
+  int accumulation_time = 3; //sec
+
+
+  double R1 = 1000000; //big resistor or sum of upper resisters
+  double R2 = 1000; //small resistor
+
+  double CT_Ratio = 2000; // to 1
+  double burden = 2.5*2; // 2 resisters differential burdens or 1 single burden resistor for single ended.
+  
+  //constants
+#define  PMAX 33516139
+#define  Sample_Rate 8000
+#define  WTHR_Value 33516139
+#define  V_PGA  1
+#define  I_PGA  1
+#define  I_channel_ADC_FS  (.3535 / I_PGA)
+#define  V_channel_ADC_FS  (.3535 / V_PGA)
+#define  RMS_FS_Codes 4191910 //50hz  
+//#define  RMS_FS_Codes 3493258 //60hz  
+
+
+  //calculated
+  double Percent_FS_Voltage = (((R2 / (R1 + R2)) * V_TEST) / V_channel_ADC_FS);
+  double Percent_FS_Current = ((I_TEST / CT_Ratio) * burden ) / I_channel_ADC_FS;
+  double V_Fullscale = V_TEST / Percent_FS_Voltage;
+  double I_Fullscale = I_TEST / Percent_FS_Current;
+  double Expected_CF_Freq = (meter_constant / 1000 * V_TEST * I_TEST * Power_factor) / 3600;
+  //double IRMS_LSB = 0;
+  //double VRMS_LSB = 0;
+  //double WATT_LSB = 0;
+  //double KWH_LSB = 0;
+  
+  
+  uint16_t CFDEN_CAL_VALUE = (uint16_t)(((33516139 / WTHR_Value) * 8000 * Power_factor * Percent_FS_Voltage * Percent_FS_Current) / Expected_CF_Freq);
+  int32_t AIGAIN_CAL_VALUE = (int32_t)((((RMS_FS_Codes * Percent_FS_Current) / (double)ADE7878_SPI_READ(AIRMS, 4)) - 1) * 8388608); // 2^23 = 8388608
+  int32_t AVGAIN_CAL_VALUE = (int32_t)((((RMS_FS_Codes * Percent_FS_Voltage) / (double)ADE7878_SPI_READ(AVRMS, 4)) - 1) * 8388608); // 2^23 = 8388608
+
+  int32_t BIGAIN_CAL_VALUE = (int32_t)((((RMS_FS_Codes * Percent_FS_Current) / (double)ADE7878_SPI_READ(BIRMS, 4)) - 1) * 8388608); // 2^23 = 8388608
+  int32_t BVGAIN_CAL_VALUE = (int32_t)((((RMS_FS_Codes * Percent_FS_Voltage) / (double)ADE7878_SPI_READ(BVRMS, 4)) - 1) * 8388608); // 2^23 = 8388608
+
+  int32_t CIGAIN_CAL_VALUE = (int32_t)((((RMS_FS_Codes * Percent_FS_Current) / (double)ADE7878_SPI_READ(CIRMS, 4)) - 1) * 8388608); // 2^23 = 8388608
+  int32_t CVGAIN_CAL_VALUE = (int32_t)((((RMS_FS_Codes * Percent_FS_Voltage) / (double)ADE7878_SPI_READ(CVRMS, 4)) - 1) * 8388608); // 2^23 = 8388608
+
+
+  Serial.println("");
+  Serial.print("  V_TEST Used For Calibration = "); Serial.println(V_TEST);
+  Serial.print("  I_TEST Used For Calibration = "); Serial.println(I_TEST);
+  Serial.print("  Power_factor Used For Calibration = "); Serial.println(Power_factor);
+  Serial.print("  Line_Freq Used For Calibration = "); Serial.println(Line_Freq);
+  Serial.print("  Accumulation Time Used For Calibration = "); Serial.println(accumulation_time);
+  Serial.println("");
+
+  Serial.print("  Vlevel Calculated Register Value = "); Serial.println((uint32_t)((V_Fullscale / V_TEST) * 4000000), HEX);
+  Serial.println("");
+
+  ADE7878_SPI_WRITE(VLEVEL, (uint32_t)((V_Fullscale / V_TEST) * 491520), 4);
+  
+  Serial.print("  V_TEST = "); Serial.print(Percent_FS_Voltage * 100, 2); Serial.print("% Fullscale"); Serial.print(" = "); Serial.print(V_channel_ADC_FS * Percent_FS_Voltage,4);Serial.print(" VRMS at ADC input and ");Serial.print(V_Fullscale, 2); Serial.println(" VRMS Fullscale");
+  Serial.print("  I_TEST = "); Serial.print(Percent_FS_Current * 100, 2); Serial.print("% Fullscale"); Serial.print(" = "); Serial.print(I_channel_ADC_FS * Percent_FS_Current,4);Serial.print(" VRMS at ADC input and ");Serial.print(I_Fullscale, 2); Serial.println(" IRMS Fullscale");
+
+  
+
+  Serial.println("");
+  Serial.print("  Expected_CF_Freq = "); Serial.println(Expected_CF_Freq, 6);
+  Serial.print("  CFDEN_CAL_VALUE = "); Serial.println(CFDEN_CAL_VALUE);
+  Serial.println("");
+
+  ADE7878_SPI_WRITE(CF1DEN, CFDEN_CAL_VALUE, 2);
+  ADE7878_SPI_WRITE(CF2DEN, CFDEN_CAL_VALUE, 2);
+  ADE7878_SPI_WRITE(CF3DEN, CFDEN_CAL_VALUE, 2);
+  
+  Serial.print("  AIRMS Expected = "); Serial.println(Percent_FS_Current * RMS_FS_Codes ,0);
+  Serial.print("  AVRMS Expected = "); Serial.println(Percent_FS_Voltage * RMS_FS_Codes ,0);
+  Serial.print("  AIRMS RAW = "); Serial.println(ADE7878_SPI_READ(AIRMS, 4), DEC);
+  Serial.print("  AVRMS RAW = "); Serial.println(ADE7878_SPI_READ(AVRMS, 4), DEC);
+  Serial.println("");
+  Serial.print("  AIGAIN_CAL_VALUE "); Serial.println(AIGAIN_CAL_VALUE);
+  Serial.print("  AVGAIN_CAL_VALUE "); Serial.println(AVGAIN_CAL_VALUE);
+  Serial.println("");
+
+  ADE7878_SPI_WRITE(AIGAIN, AIGAIN_CAL_VALUE, 4);
+  ADE7878_SPI_WRITE(AVGAIN, AVGAIN_CAL_VALUE, 4);
+  
+  Serial.print("  BIRMS Expected = "); Serial.println(Percent_FS_Current * RMS_FS_Codes ,0);
+  Serial.print("  BVRMS Expected = "); Serial.println(Percent_FS_Voltage * RMS_FS_Codes ,0);
+  Serial.print("  BIRMS RAW = "); Serial.println(ADE7878_SPI_READ(BIRMS, 4), DEC);
+  Serial.print("  BVRMS RAW = "); Serial.println(ADE7878_SPI_READ(BVRMS, 4), DEC);
+  Serial.println("");
+  Serial.print("  BIGAIN_CAL_VALUE "); Serial.println(BIGAIN_CAL_VALUE);
+  Serial.print("  BVGAIN_CAL_VALUE "); Serial.println(BVGAIN_CAL_VALUE);
+  Serial.println("");
+
+  ADE7878_SPI_WRITE(BIGAIN, BIGAIN_CAL_VALUE, 4);
+  ADE7878_SPI_WRITE(BVGAIN, BVGAIN_CAL_VALUE, 4);
+
+
+  Serial.print("  CIRMS Expected = "); Serial.println(Percent_FS_Current * RMS_FS_Codes ,0);
+  Serial.print("  CVRMS Expected = "); Serial.println(Percent_FS_Voltage * RMS_FS_Codes ,0);
+  Serial.print("  CIRMS RAW = "); Serial.println(ADE7878_SPI_READ(CIRMS, 4), DEC);
+  Serial.print("  CVRMS RAW = "); Serial.println(ADE7878_SPI_READ(CVRMS, 4), DEC);
+  Serial.println("");
+  Serial.print("  CIGAIN_CAL_VALUE "); Serial.println(CIGAIN_CAL_VALUE);
+  Serial.print("  CVGAIN_CAL_VALUE "); Serial.println(CVGAIN_CAL_VALUE);
+  Serial.println("");
+
+  ADE7878_SPI_WRITE(CIGAIN, CIGAIN_CAL_VALUE, 4);
+  ADE7878_SPI_WRITE(CVGAIN, CVGAIN_CAL_VALUE, 4);
+
+
+
+  ADE7878_SPI_WRITE(LINECYC, (accumulation_time / (1.00 / Line_Freq / 2)), 2); // 300 half linecycles or 3 sec at 50Hz  360 half line cycles at 60hz for 3 sec
+
+  Serial.print("  LINECYCLES for "); Serial.print(accumulation_time); Serial.print(" SEC accumulation time = "); Serial.println(accumulation_time / (1.00 / Line_Freq / 2), 0);
+
+  IRMS_LSB = I_TEST / (RMS_FS_Codes * Percent_FS_Current);
+  VRMS_LSB = V_TEST / (RMS_FS_Codes * Percent_FS_Voltage);
+  WATT_LSB = (V_TEST * I_TEST) / (PMAX * Percent_FS_Current * Percent_FS_Voltage / pow(2,4) ) ; // register is 2^4 smaller the output of LPF
+
+//<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
+
+  //Or KWH/LSB can be calculated by using expected values and the signal chain. (watthr over accumulation time) / (calculated watthr register over accumulation time )// note accumulation time cancels out I left it in for clarity
+  
+  WH_LSB = ((double)(((V_TEST * I_TEST * Power_factor) / 3600) * accumulation_time) / (((double)(PMAX * Percent_FS_Current * Percent_FS_Voltage  * 8000 * accumulation_time )) / ((double)(WTHR_Value)))); // (watthr over accumulation time) / (calculated watthr register over accumulation time )
+  
+//<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
+
+
+  Serial.println("");
+  Serial.print("  IRMS_LSB = "); Serial.println(IRMS_LSB, 8);
+  Serial.print("  VRMS_LSB = "); Serial.println(VRMS_LSB, 8);
+  Serial.print("  WATT_LSB = "); Serial.println(WATT_LSB, 8);
+  Serial.print("  WH_LSB  = "); Serial.println(WH_LSB, 8);
+  Serial.println("");
+
+  delay(10000);
+
+  Serial.println("  Cf will measure 3 x expected CF if 3 phases are preset at same V and I and PF");
+  Serial.print("  Cf Frequency Measured By Micro = "); Serial.print(cf_freq, 6); Serial.println(" HZ ");
+  Serial.println("");
+  Serial.println("");
+  while (1) {
+    if ( (ADE7878_SPI_READ(STATUS0, 4) & 32) == 32)
+    {
+      ADE7878_SPI_WRITE(STATUS0, 32, 4);
+      
+      Serial.print("  Updated Every "); Serial.print(accumulation_time / (1.00 / Line_Freq / 2),0); Serial.println(" Half Lincycles ");
+      Serial.println("");
+      Serial.print("  AIRMS = "); Serial.print(ADE7878_SPI_READ(AIRMS, 4) * IRMS_LSB,4); Serial.println(" IRMS");
+      Serial.print("  AVRMS = "); Serial.print(ADE7878_SPI_READ(AVRMS, 4) * VRMS_LSB,4); Serial.println(" VRMS");
+      
+      Serial.print("  AWATT = "); Serial.print(Sign_extend(ADE7878_SPI_READ(AWATT, 4)) * WATT_LSB,4); Serial.println(" WATTS"); 
+      Serial.print("  AVA   = ");   Serial.print(ADE7878_SPI_READ(AVA, 4) * WATT_LSB,4); Serial.println(" WATTS"); 
+      Serial.print("  AVAR  = ");  Serial.print(Sign_extend(ADE7878_SPI_READ(AVAR, 4)) * WATT_LSB,4); Serial.println(" WATTS"); 
+
+      Serial.print("  AWATTHR = "); Serial.print(Sign_extend(ADE7878_SPI_READ(AWATTHR, 4)) * WH_LSB/1000,6); Serial.print(" KW / ");Serial.print(accumulation_time);Serial.println(" SEC accumulation");
+      Serial.print("  AVAHR   = ");   Serial.print(ADE7878_SPI_READ(AVAHR, 4) * WH_LSB/1000,6); Serial.print(" KW / ");Serial.print(accumulation_time);Serial.println(" SEC accumulation");
+      Serial.print("  AVARHR  = ");  Serial.print(Sign_extend(ADE7878_SPI_READ(AVARHR, 4)) * WH_LSB/1000,6); Serial.print(" KW / ");Serial.print(accumulation_time);Serial.println(" SEC accumulation");
+      
+      Serial.println("");
+      Serial.print("  BIRMS = "); Serial.print(ADE7878_SPI_READ(BIRMS, 4) * IRMS_LSB,4); Serial.println(" IRMS");
+      Serial.print("  BVRMS = "); Serial.print(ADE7878_SPI_READ(BVRMS, 4) * VRMS_LSB,4); Serial.println(" VRMS");
+      
+      Serial.print("  BWATT = "); Serial.print(Sign_extend(ADE7878_SPI_READ(BWATT, 4)) * WATT_LSB,4); Serial.println(" WATTS"); 
+      Serial.print("  BVA   = ");   Serial.print(ADE7878_SPI_READ(BVA, 4) * WATT_LSB,4); Serial.println(" WATTS"); 
+      Serial.print("  BVAR  = ");  Serial.print(Sign_extend(ADE7878_SPI_READ(BVAR, 4)) * WATT_LSB,4); Serial.println(" WATTS"); 
+
+      Serial.print("  BWATTHR = "); Serial.print(Sign_extend(ADE7878_SPI_READ(BWATTHR, 4)) * WH_LSB / 1000,6); Serial.print(" KW / ");Serial.print(accumulation_time);Serial.println(" SEC accumulation");
+      Serial.print("  BVAHR   = ");   Serial.print(ADE7878_SPI_READ(BVAHR, 4) * WH_LSB/1000,6);Serial.print(" KW / ");Serial.print(accumulation_time);Serial.println(" SEC accumulation");
+      Serial.print("  BVARHR  = ");  Serial.print(Sign_extend(ADE7878_SPI_READ(BVARHR, 4)) * WH_LSB/1000,6); Serial.print(" KW / ");Serial.print(accumulation_time);Serial.println(" SEC accumulation");
+      
+      Serial.println("");
+      Serial.print("  CIRMS = "); Serial.print(ADE7878_SPI_READ(CIRMS, 4) * IRMS_LSB,4); Serial.println(" IRMS");
+      Serial.print("  CVRMS = "); Serial.print(ADE7878_SPI_READ(CVRMS, 4) * VRMS_LSB,4); Serial.println(" VRMS");
+      
+      Serial.print("  CWATT = "); Serial.print(Sign_extend(ADE7878_SPI_READ(CWATT, 4)) * WATT_LSB,4); Serial.println(" WATTS"); 
+      Serial.print("  CVA   = ");   Serial.print(ADE7878_SPI_READ(CVA, 4) * WATT_LSB,4); Serial.println(" WATTS"); 
+      Serial.print("  CVAR  = ");  Serial.print(Sign_extend(ADE7878_SPI_READ(CVAR, 4)) * WATT_LSB,4); Serial.println(" WATTS");
+    
+      Serial.print("  CWATTHR = "); Serial.print(Sign_extend(ADE7878_SPI_READ(CWATTHR, 4)) * WH_LSB / 1000,6); Serial.print(" KW / ");Serial.print(accumulation_time);Serial.println(" SEC accumulation");
+      Serial.print("  CVAHR   = ");   Serial.print(ADE7878_SPI_READ(CVAHR, 4) * WH_LSB/1000,6); Serial.print(" KW / ");Serial.print(accumulation_time);Serial.println(" SEC accumulation");
+      Serial.print("  CVARHR  = ");  Serial.print(Sign_extend(ADE7878_SPI_READ(CVARHR, 4)) * WH_LSB/1000,6);Serial.print(" KW / ");Serial.print(accumulation_time);Serial.println(" SEC accumulation");
+      
+      Serial.println("");
+    }
+  }
+}
+
+int32_t Sign_extend(int32_t reg_value)
+{
+  if (reg_value > 0x800000)
+    reg_value = reg_value + 0xFF000000;
+    return reg_value;
+}
+
+  
+
+
+void ADE7878_reg_config()
+{
+ 
+  
+  //ADE7878_SPI_WRITE(AIGAIN, 0x0, 4);
+  Serial.print("AIGAIN = ");
+  Serial.println(ADE7878_SPI_READ(AIGAIN,4), HEX);
+
+  
+  //ADE7878_SPI_WRITE(BIGAIN, 0x0, 4);
+  Serial.print("BIGAIN = ");
+  Serial.println(ADE7878_SPI_READ(BIGAIN,4), HEX);
+  
+  
+  //ADE7878_SPI_WRITE(CIGAIN, 0x0, 4);
+  Serial.print("CIGAIN = ");  
+  Serial.println(ADE7878_SPI_READ(CIGAIN,4), HEX);
+  
+  //ADE7878_SPI_WRITE(AVGAIN, 0x0 , 4);
+  Serial.print("AVGAIN = ");  
+  Serial.println(ADE7878_SPI_READ(AVGAIN,4), HEX);
+  
+  //ADE7878_SPI_WRITE(BVGAIN, 0x0 , 4);
+  Serial.print("BVGAIN = ");  
+  Serial.println(ADE7878_SPI_READ(BVGAIN,4), HEX);
+  
+  //ADE7878_SPI_WRITE(CVGAIN, 0x0 , 4);
+  Serial.print("CVGAIN = ");  
+  Serial.println(ADE7878_SPI_READ(CVGAIN,4), HEX);
+
+  ADE7878_SPI_WRITE(CF1DEN, 0x64 ,2);
+  Serial.print("CF1DEN = ");  
+  Serial.println(ADE7878_SPI_READ(CF1DEN,2), HEX);
+
+  ADE7878_SPI_WRITE(CF2DEN, 0x64 ,2);
+  Serial.print("CF2DEN = ");  
+  Serial.println(ADE7878_SPI_READ(CF2DEN,2), HEX);
+
+  ADE7878_SPI_WRITE(CF3DEN, 0x64 ,2);
+  Serial.print("CF3DEN = ");  
+  Serial.println(ADE7878_SPI_READ(CF3DEN,2), HEX);
+
+  ADE7878_SPI_WRITE(WTHR0, 0xFF6A6B ,4);
+  Serial.print("WTHR0 = ");  
+  Serial.println(ADE7878_SPI_READ(WTHR0,4), HEX);
+
+   ADE7878_SPI_WRITE(WTHR1, 0x01 ,4);
+  Serial.print("WTHR1 = ");  
+  Serial.println(ADE7878_SPI_READ(WTHR1,4), HEX);
+
+  ADE7878_SPI_WRITE(VARTHR0, 0xFF6A6B ,4);
+  Serial.print("VARTHR0 = ");  
+  Serial.println(ADE7878_SPI_READ(VARTHR0,4), HEX);
+
+   ADE7878_SPI_WRITE(VARTHR1, 0x01 ,4);
+  Serial.print("VARTHR1 = ");  
+  Serial.println(ADE7878_SPI_READ(VARTHR1,4), HEX);
+
+   ADE7878_SPI_WRITE(VATHR0, 0xFF6A6B ,4);
+  Serial.print("VATHR0 = ");  
+  Serial.println(ADE7878_SPI_READ(VATHR0,4), HEX);
+
+  ADE7878_SPI_WRITE(VATHR1, 0x01 ,4);
+  Serial.print("VATHR1 = ");  
+  Serial.println(ADE7878_SPI_READ(VATHR1,4), HEX);
+
+
+ 
+  //ADE7878_SPI_WRITE(MASK0, 0x20000, 4); //write run bit
+  Serial.print("MASK0 = ");  
+  Serial.println(ADE7878_SPI_READ(MASK0,4), HEX);
+
+  ADE7878_SPI_WRITE(CFMODE, 0x88, 2); //write run bit
+  Serial.print("cfmode = ");  
+  Serial.println(ADE7878_SPI_READ(CFMODE,2), HEX);
+
+  ADE7878_SPI_WRITE(LCYCMODE, 0xF, 1); //set to use phase a zero crosses for linecycle accumulation
+  Serial.print("cfmode = ");  
+  Serial.println(ADE7878_SPI_READ(LCYCMODE,1), HEX);
+
+  
+  ADE7878_SPI_WRITE(RUN, 0x0001, 2); //write run bit
+  Serial.print("RUN = ");  
+  Serial.println(ADE7878_SPI_READ(RUN,2), HEX);
+}
+
+void READ_RMS_ENERGIES_PRINT()
+{
+
+  Serial.print("AIRM = ");
+  Serial.print(ADE7878_SPI_READ(AIRMS,4)*IRMS_LSB, DEC);
+  Serial.print("  BIRM = ");
+  Serial.print(ADE7878_SPI_READ(BIRMS,4)*IRMS_LSB, DEC);
+  Serial.print("  CIRMS =  ");
+  Serial.print(ADE7878_SPI_READ(CIRMS,4)*IRMS_LSB, DEC);
+  Serial.print("  AVRMS =  ");
+  Serial.print(ADE7878_SPI_READ(AVRMS,4)*VRMS_LSB, DEC);
+  Serial.print("  BVRMS =  ");
+  Serial.print(ADE7878_SPI_READ(BVRMS,4)*VRMS_LSB, DEC);
+  Serial.print("  CVRMS =  ");
+  Serial.print(ADE7878_SPI_READ(CVRMS,4)*VRMS_LSB, DEC);
+  Serial.print("  AWATT =  ");
+  Serial.print(ADE7878_SPI_READ(AWATT,4)*16* WATT_LSB, HEX);
+  Serial.print("  BWATT =  ");
+  Serial.print(ADE7878_SPI_READ(BWATT,4)*16* WATT_LSB, HEX);
+  Serial.print("  CWATT =  ");
+  Serial.print(ADE7878_SPI_READ(CWATT,4)*16* WATT_LSB, HEX);
+  Serial.print(" ");
+  Serial.println(" ");
+  
+}
+
+
+
+
+
+
+void ADE7878_SPI_WRITE(uint16_t Address , uint32_t Data , uint8_t Number_of_bytes)
+{
+  uint8_t mhb = 0, hb = 0, mb = 0, lb = 0, p = 0;
+  uint32_t j;
+
+  j = Data & 0xff;
+  lb = j;
+  j = (Data & 0xff00) >> 8;
+  mb = j;
+  j = (Data & 0xff0000) >> 16;
+  hb = j;
+  j = (Data & 0xff000000) >> 24;
+  mhb = j;
+
+
+  digitalWrite(SSB_A, LOW);   //set csb low
+
+
+  data = SPI.transfer(0x00);  // send address with read bit modified
+
+  data = SPI.transfer((Address & 0xFF00) >> 8);      // send upper address with write bit modified
+
+  data = SPI.transfer(Address & 0xFF);       // send lower address with write bit modified
+
+  //send requested number of bytes
+  switch (Number_of_bytes) {
+    case 4:
+      data = SPI.transfer(mhb);
+    case 3:
+      data = SPI.transfer(hb);
+    case 2:
+      data = SPI.transfer(mb);
+    case 1:
+      data = SPI.transfer(lb);
+
+    default:
+      break;
+  }
+
+  digitalWrite(SSB_A, HIGH);  //set csb high
+}
+
+
+
+
+
+// ADE7878_SPI_READ is working~ 7/7/15
+uint32_t ADE7878_SPI_READ (uint16_t Address, uint8_t Number_of_bytes)
+{
+  uint8_t mhb = 0, hb = 0, mb = 0, lb = 0;
+  uint32_t j;
+
+
+  digitalWrite(SSB_A, LOW);   //set csb low
+
+
+  data = SPI.transfer(0x01);  // send address with read bit modified
+
+  data = SPI.transfer((Address & 0xFF00) >> 8);      // send upper address with write bit modified
+
+  data = SPI.transfer(Address & 0xFF);       // send lower address with write bit modified
+
+
+  hb = 0;
+
+  switch (Number_of_bytes) {
+    case 4:
+      mhb = SPI.transfer(0x0);   // dummy write
+    case 3:
+      hb = SPI.transfer(0x0);
+    case 2:
+      mb = SPI.transfer(0x0);
+    case 1:
+      lb = SPI.transfer(0x0);
+    default:
+      break;
+  }
+
+  digitalWrite(SSB_A, HIGH);  //set csb high
+
+  j = mhb << 24;
+  j = j + (hb << 16);
+  j = j + (mb << 8);
+  j = j + lb;
+  return j;
+}
