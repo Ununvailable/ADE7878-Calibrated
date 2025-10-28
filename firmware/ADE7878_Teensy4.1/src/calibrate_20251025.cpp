@@ -105,6 +105,21 @@ static uint32_t ade_read_u32(uint16_t reg, uint8_t nbytes) {
 // Ghi theo cùng mẫu
 static bool ade_write(uint16_t reg, uint32_t data, uint8_t nbytes) {
   if (nbytes < 1 || nbytes > 4) return false;
+  // --- 1. Detect 32 ZPSE registers (gain/offset family) ---
+  bool isZPSE =
+    (reg >= 0x4380 && reg <= 0x4386) ||   // AIGAIN..NIGAIN
+    (reg >= 0x4387 && reg <= 0x438D);     // AIRMSOS..NIRMSOS
+
+  // --- 2. If ZPSE, sign-extend 24-bit value into 32-bit frame ---
+  uint32_t tx32 = data;
+  if (isZPSE) {
+    int32_t s24 = (int32_t)(data & 0x00FFFFFFu);
+    if (s24 & 0x00800000u) s24 |= 0xFF000000u;   // full sign-extend
+    // Build ZPSE word: bits[31:28]=0, bits[27:24]=sign nibble
+    uint32_t signNibble = (s24 < 0) ? 0x0F000000u : 0x00000000u;
+    tx32 = signNibble | (uint32_t)(s24 & 0x00FFFFFFu);
+    nbytes = 4;                                 // always transmit 4 bytes
+  }
   uint8_t b[4] = {
     (uint8_t)(data >> 24), (uint8_t)(data >> 16),
     (uint8_t)(data >> 8),  (uint8_t)(data)
@@ -115,6 +130,16 @@ static bool ade_write(uint16_t reg, uint32_t data, uint8_t nbytes) {
   for (uint8_t i = 4 - nbytes; i < 4; i++) Wire.write(b[i]);
   return (Wire.endTransmission() == 0);
 }
+
+static inline uint32_t ade_zpse_write(int32_t s24) {
+  // Clamp to ±2^23−1
+  if (s24 > 0x7FFFFF) s24 = 0x7FFFFF;
+  if (s24 < -0x800000) s24 = -0x800000;
+  uint32_t u24 = (uint32_t)s24 & 0x00FFFFFF;
+  uint32_t signNibble = (u24 & 0x00800000) ? 0x0F000000 : 0x00000000;
+  return signNibble | u24;        // 32-bit word per 32 ZPSE spec
+}
+
 
 // Đọc 24-bit unsigned/signed
 static uint32_t ade_read_u24(uint16_t reg) {
@@ -247,10 +272,10 @@ static bool tune_AVRMS_to(double V_TARGET_Vrms,
                           uint16_t delay_ms_between = 10,
                           uint8_t max_iters = 12)
 {
-  // if (VRMS_LSB <= 0.0) {
-  //   Serial.println(F("[tune_AVRMS_to] VRMS_LSB chua san sang. Calib V trước."));
-  //   return false;
-  // }
+  if (VRMS_LSB <= 0.0) {
+    Serial.println(F("[tune_AVRMS_to] VRMS_LSB chua san sang. Calib V trước."));
+    return false;
+  }
 
   int32_t AVGAIN_now = (int32_t)ade_read_u32(AVGAIN, 4);
 
@@ -293,22 +318,27 @@ static bool tune_AVRMS_to(double V_TARGET_Vrms,
 }
 
 // ========= Tuning (Current) =========
+// Adaptive AIRMS tuning with proportional gain adjustment
 static bool tune_AIRMS_to(double I_TARGET_Arms,
                           double tolerance_frac = 0.01,
-                          uint8_t avg_samples = 64,
+                          uint32_t avg_samples = 64,
                           uint16_t delay_ms_between = 8,
-                          uint8_t max_iters = 12)
+                          uint8_t max_iters = 24)    // allow more loops
 {
   if (IRMS_LSB <= 0.0) {
-    Serial.println(F("[tune_AIRMS_to] IRMS_LSB chua san sang. Calib I trước."));
+    Serial.println(F("[tune_AIRMS_to] IRMS_LSB chưa sẵn sàng."));
     return false;
   }
 
   int32_t AIGAIN_now = (int32_t)ade_read_u32(AIGAIN, 4);
+  const int32_t MAX_24 = (1 << 23) - 1;
+  const int32_t MIN_24 = -(1 << 23);
 
   for (uint8_t it = 0; it < max_iters; it++) {
-    double AIRMS_raw = avg_AIRMS_via_zx(48, 250);  // Use Phase A
-    if (AIRMS_raw <= 0.0) AIRMS_raw = readRMS24_avg(AIRMS, avg_samples, delay_ms_between);
+
+    double AIRMS_raw = avg_AIRMS_via_zx(48, 250);
+    if (AIRMS_raw <= 0.0)
+      AIRMS_raw = readRMS24_avg(AIRMS, avg_samples, delay_ms_between);
 
     double I_meas = AIRMS_raw * IRMS_LSB;
     if (I_meas <= 1e-12) {
@@ -317,9 +347,10 @@ static bool tune_AIRMS_to(double I_TARGET_Arms,
     }
 
     double err_frac = (I_meas - I_TARGET_Arms) / I_TARGET_Arms;
-    Serial.print(F("  it="));      Serial.print(it);
-    Serial.print(F("  I_meas="));  Serial.print(I_meas, 6);
-    Serial.print(F(" A  err="));   Serial.print(err_frac * 100.0, 4);
+
+    Serial.print(F("  it="));  Serial.print(it);
+    Serial.print(F("  I_meas=")); Serial.print(I_meas, 6);
+    Serial.print(F(" A  err="));  Serial.print(err_frac * 100.0, 4);
     Serial.println(F(" %"));
 
     if (fabs(err_frac) < tolerance_frac) {
@@ -327,16 +358,43 @@ static bool tune_AIRMS_to(double I_TARGET_Arms,
       return true;
     }
 
-    double  k   = I_TARGET_Arms / I_meas;
-    int32_t dAI = (int32_t)llround((k - 1.0) * 8388608.0);
+    // ---------- Adaptive scaling ----------
+    double k = I_TARGET_Arms / I_meas;     // ideal multiplicative factor
+    double abs_err = fabs(err_frac);
 
-    const int32_t STEP_CLAMP = 300000;
-    if (dAI >  STEP_CLAMP) dAI =  STEP_CLAMP;
-    if (dAI < -STEP_CLAMP) dAI = -STEP_CLAMP;
+    // Base proportional step
+    double step_factor;
+    if      (abs_err > 0.80) step_factor = 1.0;     // 100% of computed step
+    else if (abs_err > 0.50) step_factor = 0.6;
+    else if (abs_err > 0.20) step_factor = 0.3;
+    else if (abs_err > 0.10) step_factor = 0.15;
+    else                     step_factor = 0.05;    // fine tuning region
+
+    // Convert to signed delta in Q23 domain
+    int32_t dAI = (int32_t)llround((k - 1.0) * 8388608.0 * step_factor);
+
+    // Dynamic clamp proportional to error magnitude
+    int32_t step_limit = (int32_t)llround(600000.0 * (1.0 + 4.0 * abs_err));
+    if (dAI >  step_limit) dAI =  step_limit;
+    if (dAI < -step_limit) dAI = -step_limit;
 
     AIGAIN_now += dAI;
-    ade_write(AIGAIN, (uint32_t)AIGAIN_now, 4);
-    delay(250);
+    if (AIGAIN_now > MAX_24) AIGAIN_now = MAX_24;
+    if (AIGAIN_now < MIN_24) AIGAIN_now = MIN_24;
+
+    // Build 32-bit ZPSE word and write
+    uint32_t u24 = (uint32_t)AIGAIN_now & 0x00FFFFFFu;
+    uint32_t signNibble = (AIGAIN_now < 0) ? 0x0F000000u : 0x00000000u;
+    uint32_t tx32 = signNibble | u24;
+
+    Serial.print(F("AIGAIN sent: "));
+    Serial.println(AIGAIN_now);
+    ade_write(AIGAIN, tx32, 4);
+    delay(300);
+
+    uint32_t rb32 = ade_read_u32(AIGAIN, 4);
+    Serial.print(F("AIGAIN read: "));
+    Serial.println(rb32);
   }
 
   Serial.println(F("[tune_AIRMS_to] Hết số vòng lặp, chưa đạt sai số yêu cầu."));
@@ -443,60 +501,6 @@ static void calibrate_V(double V_TEST_Vrms) {
 }
 
 // ========= Calibrate Current =========
-// static void calibrate_I(double I_TEST_Arms) {
-//   last_ITEST_Arms = I_TEST_Arms;
-
-//   const double I_sec        = I_TEST_Arms / CT_RATIO; // Arms secondary
-//   const double Iadc_Vrms    = I_sec * BURDEN_OHM;     // Vrms @ ADC
-//   const double percentFS_I  = Iadc_Vrms / ADC_FS_I;
-
-//   if (percentFS_I <= 0.0 || percentFS_I > 0.98) {
-//     Serial.println(F("[Calib I] CẢNH BÁO: %FS_I ngoài vùng an toàn (0..0.98). Kiểm tra CT/burden."));
-//   }
-
-//   delay(300);
-
-//   double AIRMS_raw = avg_AIRMS_via_zx(64, 250);
-//   if (AIRMS_raw <= 0.0) AIRMS_raw = readRMS24_avg(AIRMS, 64, 8);
-
-//   // double BIRMS_raw = avg_BIRMS_via_zx(64, 250);
-//   // if (BIRMS_raw <= 0.0) BIRMS_raw = readRMS24_avg(BIRMS, 64, 8);
-
-//   const double target_codes = (double)FS_RMS_CODES * percentFS_I;
-//   // const int32_t AIGAIN_val  = (int32_t)llround( ((target_codes / max(1.0, BIRMS_raw)) - 1.0) * 8388608.0 );
-//   const int32_t AIGAIN_val  = (int32_t)llround( ((target_codes / max(1.0, AIRMS_raw)) - 1.0) * 8388608.0 );
-//   ade_write(AIGAIN, AIGAIN_val, 4);
-
-//   IRMS_LSB = I_TEST_Arms / (FS_RMS_CODES * percentFS_I);
-
-//   Serial.println(F("\n[Calib I] DONE (sơ bộ)"));
-//   Serial.print(F("  I_TEST(Arms)=")); Serial.print(I_TEST_Arms, 4);
-//   Serial.print(F("  percentFS_I="));   Serial.println(percentFS_I, 6);
-//   Serial.print(F("  AIGAIN="));        Serial.println(AIGAIN_val);
-//   Serial.print(F("  IRMS_LSB="));      Serial.println(IRMS_LSB, 10);
-
-//   // double I_now = (double)ade_read_u24(BIRMS) * IRMS_LSB;
-//   // Serial.print(F("  Check BIRMS ≈ ")); Serial.print(I_now, 6); Serial.println(F(" A"));
-//   double I_now = (double)ade_read_u24(AIRMS) * IRMS_LSB;
-//   Serial.print(F("  Check AIRMS ≈ ")); Serial.print(I_now, 6); Serial.println(F(" A"));
-
-//   // Serial.println(F(">> Tinh chỉnh AIGAIN (mục tiêu sai số < 1%)"));
-//   // bool okI = tune_BIRMS_to(last_ITEST_Arms, 0.01, 64, 8, 12);
-//   Serial.println(F(">> Tinh chỉnh AIGAIN (mục tiêu sai số < 1%)"));
-//   bool okI = tune_AIRMS_to(last_ITEST_Arms, 0.01, 64, 8, 12);
-
-//   // double I_after = (double)ade_read_u24(BIRMS) * IRMS_LSB;
-//   // Serial.print(F("Kết thúc tune: BIRMS ≈ ")); Serial.print(I_after, 6); Serial.println(F(" A"));
-//   // if (!okI) {
-//   //   Serial.println(F("Cảnh báo: chưa đạt <1%. Có thể tăng max_iters/avg_samples hoặc giảm STEP_CLAMP."));
-//   // }
-//   double I_after = (double)ade_read_u24(AIRMS) * IRMS_LSB;
-//   Serial.print(F("Kết thúc tune: AIRMS ≈ ")); Serial.print(I_after, 6); Serial.println(F(" A"));
-//   if (!okI) {
-//     Serial.println(F("Cảnh báo: chưa đạt <1%. Có thể tăng max_iters/avg_samples hoặc giảm STEP_CLAMP."));
-//   }
-// }
-
 static void calibrate_I(double I_TEST_Arms) {
   last_ITEST_Arms = I_TEST_Arms;
 
@@ -522,10 +526,14 @@ static void calibrate_I(double I_TEST_Arms) {
 
   // AIGAIN = (target/actual - 1) in Q23 format
   const int32_t AIGAIN_val = (int32_t)llround( ((target_codes / max(1.0, AIRMS_raw)) - 1.0) * 8388608.0 );
+  // uint32_t u24 = (uint32_t)AIGAIN_val & 0x00FFFFFFu;
+  // uint32_t signNibble = (AIGAIN_val < 0) ? 0x0F000000u : 0x00000000u;
+  // uint32_t tx32 = signNibble | u24;
   ade_write(AIGAIN, AIGAIN_val, 4);
 
   // LSB converts codes to PRIMARY current (Amps)
-  IRMS_LSB = I_TEST_Arms / (FS_RMS_CODES * percentFS_I);
+  // IRMS_LSB = I_TEST_Arms / (FS_RMS_CODES * percentFS_I);
+  IRMS_LSB = I_TEST_Arms / max(1.0, AIRMS_raw);  // LSB based on ACTUAL measurement
 
   Serial.println(F("\n[Calib I] DONE (sơ bộ)"));
   Serial.print(F("  I_TEST(Arms)=")); Serial.print(I_TEST_Arms, 4);
@@ -538,7 +546,7 @@ static void calibrate_I(double I_TEST_Arms) {
   Serial.print(F("  Check AIRMS ≈ ")); Serial.print(I_now, 6); Serial.println(F(" A"));
 
   Serial.println(F(">> Tinh chỉnh AIGAIN (mục tiêu sai số < 1%)"));
-  bool okI = tune_AIRMS_to(last_ITEST_Arms, 0.01, 64, 8, 12);
+  bool okI = tune_AIRMS_to(last_ITEST_Arms, 0.01, 6400, 8, 200);
 
   double I_after = (double)ade_read_u24(AIRMS) * IRMS_LSB;
   Serial.print(F("Kết thúc tune: AIRMS ≈ ")); Serial.print(I_after, 6); Serial.println(F(" A"));
@@ -605,6 +613,11 @@ void setup() {
   delay(50);
 
   ade_basic_config();
+
+  // Put into basic config later
+  ade_write(AIRMSOS, 0, 4);
+  Serial.print(F("Phase A offset: "));
+  Serial.println(ade_read_u32(AIRMSOS,4));
 
   uint32_t ver = ade_read_u32(VERSION, 2);
   Serial.print(F("ADE7878 VERSION=0x")); Serial.println(ver, HEX);
