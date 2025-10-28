@@ -183,6 +183,18 @@ static double avg_AVRMS_via_zx(uint16_t ntrigs = 64, uint16_t timeout_ms = 200) 
   return ok ? (acc / ok) : 0.0;
 }
 
+static double avg_AIRMS_via_zx(uint16_t ntrigs = 64, uint16_t timeout_ms = 200) {
+  ade_set_mask1(ZXIA_BIT);
+  double acc = 0.0; uint16_t ok = 0;
+  for (uint16_t i=0; i<ntrigs; i++) {
+    if (!wait_zx(ZXIA_BIT, timeout_ms)) continue;
+    uint32_t v = ade_read_u24(AIRMS);
+    acc += (double)v; ok++;
+  }
+  ade_set_mask1(0x0000);
+  return ok ? (acc / ok) : 0.0;
+}
+
 static double avg_BIRMS_via_zx(uint16_t ntrigs = 64, uint16_t timeout_ms = 200) {
   ade_set_mask1(ZXIA_BIT);
   double acc = 0.0; uint16_t ok = 0;
@@ -235,10 +247,10 @@ static bool tune_AVRMS_to(double V_TARGET_Vrms,
                           uint16_t delay_ms_between = 10,
                           uint8_t max_iters = 12)
 {
-  if (VRMS_LSB <= 0.0) {
-    Serial.println(F("[tune_AVRMS_to] VRMS_LSB chua san sang. Calib V trước."));
-    return false;
-  }
+  // if (VRMS_LSB <= 0.0) {
+  //   Serial.println(F("[tune_AVRMS_to] VRMS_LSB chua san sang. Calib V trước."));
+  //   return false;
+  // }
 
   int32_t AVGAIN_now = (int32_t)ade_read_u32(AVGAIN, 4);
 
@@ -281,6 +293,56 @@ static bool tune_AVRMS_to(double V_TARGET_Vrms,
 }
 
 // ========= Tuning (Current) =========
+static bool tune_AIRMS_to(double I_TARGET_Arms,
+                          double tolerance_frac = 0.01,
+                          uint8_t avg_samples = 64,
+                          uint16_t delay_ms_between = 8,
+                          uint8_t max_iters = 12)
+{
+  if (IRMS_LSB <= 0.0) {
+    Serial.println(F("[tune_AIRMS_to] IRMS_LSB chua san sang. Calib I trước."));
+    return false;
+  }
+
+  int32_t AIGAIN_now = (int32_t)ade_read_u32(AIGAIN, 4);
+
+  for (uint8_t it = 0; it < max_iters; it++) {
+    double AIRMS_raw = avg_AIRMS_via_zx(48, 250);  // Use Phase A
+    if (AIRMS_raw <= 0.0) AIRMS_raw = readRMS24_avg(AIRMS, avg_samples, delay_ms_between);
+
+    double I_meas = AIRMS_raw * IRMS_LSB;
+    if (I_meas <= 1e-12) {
+      Serial.println(F("[tune_AIRMS_to] Đo AIRMS quá nhỏ/0."));
+      return false;
+    }
+
+    double err_frac = (I_meas - I_TARGET_Arms) / I_TARGET_Arms;
+    Serial.print(F("  it="));      Serial.print(it);
+    Serial.print(F("  I_meas="));  Serial.print(I_meas, 6);
+    Serial.print(F(" A  err="));   Serial.print(err_frac * 100.0, 4);
+    Serial.println(F(" %"));
+
+    if (fabs(err_frac) < tolerance_frac) {
+      Serial.println(F("[tune_AIRMS_to] DONE: |error| dưới ngưỡng."));
+      return true;
+    }
+
+    double  k   = I_TARGET_Arms / I_meas;
+    int32_t dAI = (int32_t)llround((k - 1.0) * 8388608.0);
+
+    const int32_t STEP_CLAMP = 300000;
+    if (dAI >  STEP_CLAMP) dAI =  STEP_CLAMP;
+    if (dAI < -STEP_CLAMP) dAI = -STEP_CLAMP;
+
+    AIGAIN_now += dAI;
+    ade_write(AIGAIN, (uint32_t)AIGAIN_now, 4);
+    delay(250);
+  }
+
+  Serial.println(F("[tune_AIRMS_to] Hết số vòng lặp, chưa đạt sai số yêu cầu."));
+  return false;
+}
+
 static bool tune_BIRMS_to(double I_TARGET_Arms,
                           double tolerance_frac = 0.01, // 1%
                           uint8_t avg_samples = 64,
@@ -381,42 +443,105 @@ static void calibrate_V(double V_TEST_Vrms) {
 }
 
 // ========= Calibrate Current =========
+// static void calibrate_I(double I_TEST_Arms) {
+//   last_ITEST_Arms = I_TEST_Arms;
+
+//   const double I_sec        = I_TEST_Arms / CT_RATIO; // Arms secondary
+//   const double Iadc_Vrms    = I_sec * BURDEN_OHM;     // Vrms @ ADC
+//   const double percentFS_I  = Iadc_Vrms / ADC_FS_I;
+
+//   if (percentFS_I <= 0.0 || percentFS_I > 0.98) {
+//     Serial.println(F("[Calib I] CẢNH BÁO: %FS_I ngoài vùng an toàn (0..0.98). Kiểm tra CT/burden."));
+//   }
+
+//   delay(300);
+
+//   double AIRMS_raw = avg_AIRMS_via_zx(64, 250);
+//   if (AIRMS_raw <= 0.0) AIRMS_raw = readRMS24_avg(AIRMS, 64, 8);
+
+//   // double BIRMS_raw = avg_BIRMS_via_zx(64, 250);
+//   // if (BIRMS_raw <= 0.0) BIRMS_raw = readRMS24_avg(BIRMS, 64, 8);
+
+//   const double target_codes = (double)FS_RMS_CODES * percentFS_I;
+//   // const int32_t AIGAIN_val  = (int32_t)llround( ((target_codes / max(1.0, BIRMS_raw)) - 1.0) * 8388608.0 );
+//   const int32_t AIGAIN_val  = (int32_t)llround( ((target_codes / max(1.0, AIRMS_raw)) - 1.0) * 8388608.0 );
+//   ade_write(AIGAIN, AIGAIN_val, 4);
+
+//   IRMS_LSB = I_TEST_Arms / (FS_RMS_CODES * percentFS_I);
+
+//   Serial.println(F("\n[Calib I] DONE (sơ bộ)"));
+//   Serial.print(F("  I_TEST(Arms)=")); Serial.print(I_TEST_Arms, 4);
+//   Serial.print(F("  percentFS_I="));   Serial.println(percentFS_I, 6);
+//   Serial.print(F("  AIGAIN="));        Serial.println(AIGAIN_val);
+//   Serial.print(F("  IRMS_LSB="));      Serial.println(IRMS_LSB, 10);
+
+//   // double I_now = (double)ade_read_u24(BIRMS) * IRMS_LSB;
+//   // Serial.print(F("  Check BIRMS ≈ ")); Serial.print(I_now, 6); Serial.println(F(" A"));
+//   double I_now = (double)ade_read_u24(AIRMS) * IRMS_LSB;
+//   Serial.print(F("  Check AIRMS ≈ ")); Serial.print(I_now, 6); Serial.println(F(" A"));
+
+//   // Serial.println(F(">> Tinh chỉnh AIGAIN (mục tiêu sai số < 1%)"));
+//   // bool okI = tune_BIRMS_to(last_ITEST_Arms, 0.01, 64, 8, 12);
+//   Serial.println(F(">> Tinh chỉnh AIGAIN (mục tiêu sai số < 1%)"));
+//   bool okI = tune_AIRMS_to(last_ITEST_Arms, 0.01, 64, 8, 12);
+
+//   // double I_after = (double)ade_read_u24(BIRMS) * IRMS_LSB;
+//   // Serial.print(F("Kết thúc tune: BIRMS ≈ ")); Serial.print(I_after, 6); Serial.println(F(" A"));
+//   // if (!okI) {
+//   //   Serial.println(F("Cảnh báo: chưa đạt <1%. Có thể tăng max_iters/avg_samples hoặc giảm STEP_CLAMP."));
+//   // }
+//   double I_after = (double)ade_read_u24(AIRMS) * IRMS_LSB;
+//   Serial.print(F("Kết thúc tune: AIRMS ≈ ")); Serial.print(I_after, 6); Serial.println(F(" A"));
+//   if (!okI) {
+//     Serial.println(F("Cảnh báo: chưa đạt <1%. Có thể tăng max_iters/avg_samples hoặc giảm STEP_CLAMP."));
+//   }
+// }
+
 static void calibrate_I(double I_TEST_Arms) {
   last_ITEST_Arms = I_TEST_Arms;
 
-  const double I_sec        = I_TEST_Arms / CT_RATIO; // Arms secondary
-  const double Iadc_Vrms    = I_sec * BURDEN_OHM;     // Vrms @ ADC
-  const double percentFS_I  = Iadc_Vrms / ADC_FS_I;
+  // PRIMARY current voltage at burden (after CT scales it)
+  // V_burden = (I_primary / CT_ratio) * R_burden
+  const double I_sec        = I_TEST_Arms / CT_RATIO;  // 0.9A / 2000 = 0.45mA
+  const double Iadc_Vrms    = I_sec * BURDEN_OHM;      // 0.45mA * 200Ω = 0.09V
+  const double percentFS_I  = Iadc_Vrms / ADC_FS_I;    // 0.09V / 0.353V = 25.5%
 
-  if (percentFS_I <= 0.0 || percentFS_I > 0.98) {
-    Serial.println(F("[Calib I] CẢNH BÁO: %FS_I ngoài vùng an toàn (0..0.98). Kiểm tra CT/burden."));
-  }
+  Serial.print(F(">>> DEBUG: I_sec=")); Serial.print(I_sec*1000, 3); Serial.println(F(" mA"));
+  Serial.print(F(">>> DEBUG: V_adc=")); Serial.print(Iadc_Vrms, 4); Serial.println(F(" V"));
+  Serial.print(F(">>> DEBUG: percentFS=")); Serial.print(percentFS_I*100, 2); Serial.println(F("%"));
 
   delay(300);
 
-  double BIRMS_raw = avg_BIRMS_via_zx(64, 250);
-  if (BIRMS_raw <= 0.0) BIRMS_raw = readRMS24_avg(BIRMS, 64, 8);
+  double AIRMS_raw = avg_AIRMS_via_zx(64, 250);
+  if (AIRMS_raw <= 0.0) AIRMS_raw = readRMS24_avg(AIRMS, 64, 8);
+
+  Serial.print(F(">>> DEBUG: Raw AIRMS codes=")); Serial.println(AIRMS_raw, 1);
 
   const double target_codes = (double)FS_RMS_CODES * percentFS_I;
-  const int32_t AIGAIN_val  = (int32_t)llround( ((target_codes / max(1.0, BIRMS_raw)) - 1.0) * 8388608.0 );
+  Serial.print(F(">>> DEBUG: Target codes=")); Serial.println(target_codes, 1);
+
+  // AIGAIN = (target/actual - 1) in Q23 format
+  const int32_t AIGAIN_val = (int32_t)llround( ((target_codes / max(1.0, AIRMS_raw)) - 1.0) * 8388608.0 );
   ade_write(AIGAIN, AIGAIN_val, 4);
 
+  // LSB converts codes to PRIMARY current (Amps)
   IRMS_LSB = I_TEST_Arms / (FS_RMS_CODES * percentFS_I);
 
   Serial.println(F("\n[Calib I] DONE (sơ bộ)"));
   Serial.print(F("  I_TEST(Arms)=")); Serial.print(I_TEST_Arms, 4);
-  Serial.print(F("  percentFS_I="));   Serial.println(percentFS_I, 6);
-  Serial.print(F("  AIGAIN="));        Serial.println(AIGAIN_val);
-  Serial.print(F("  IRMS_LSB="));      Serial.println(IRMS_LSB, 10);
+  Serial.print(F("  percentFS_I=")); Serial.println(percentFS_I, 6);
+  Serial.print(F("  AIGAIN=")); Serial.println(AIGAIN_val);
+  Serial.print(F("  IRMS_LSB=")); Serial.println(IRMS_LSB, 10);
 
-  double I_now = (double)ade_read_u24(BIRMS) * IRMS_LSB;
-  Serial.print(F("  Check BIRMS ≈ ")); Serial.print(I_now, 6); Serial.println(F(" A"));
+  delay(300);
+  double I_now = (double)ade_read_u24(AIRMS) * IRMS_LSB;
+  Serial.print(F("  Check AIRMS ≈ ")); Serial.print(I_now, 6); Serial.println(F(" A"));
 
   Serial.println(F(">> Tinh chỉnh AIGAIN (mục tiêu sai số < 1%)"));
-  bool okI = tune_BIRMS_to(last_ITEST_Arms, 0.01, 64, 8, 12);
+  bool okI = tune_AIRMS_to(last_ITEST_Arms, 0.01, 64, 8, 12);
 
-  double I_after = (double)ade_read_u24(BIRMS) * IRMS_LSB;
-  Serial.print(F("Kết thúc tune: BIRMS ≈ ")); Serial.print(I_after, 6); Serial.println(F(" A"));
+  double I_after = (double)ade_read_u24(AIRMS) * IRMS_LSB;
+  Serial.print(F("Kết thúc tune: AIRMS ≈ ")); Serial.print(I_after, 6); Serial.println(F(" A"));
   if (!okI) {
     Serial.println(F("Cảnh báo: chưa đạt <1%. Có thể tăng max_iters/avg_samples hoặc giảm STEP_CLAMP."));
   }
@@ -520,6 +645,7 @@ void loop() {
     }
 
     else if (c == 'I' || c == 'i') {
+      ade_write(AIGAIN, 0, 4);
       Serial.println(F("\n== Calibrate Current =="));
       Serial.print(F("Nhập I_TEST (Arms, mặc định 10): "));
       uint32_t t0 = millis();
