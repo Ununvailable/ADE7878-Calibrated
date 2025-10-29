@@ -4,7 +4,8 @@
 import sys, json, time, socket, struct, threading, math
 from PyQt6 import QtWidgets, QtCore, QtGui
 
-TEENSY_IP   = "192.168.200.177"
+# TEENSY_IP   = "192.168.200.177"
+TEENSY_IP   = "169.254.153.177"
 TEENSY_PORT = 6000
 
 HELLO_INTERVAL   = 0.5    # s, khi chưa có stream

@@ -131,16 +131,6 @@ static bool ade_write(uint16_t reg, uint32_t data, uint8_t nbytes) {
   return (Wire.endTransmission() == 0);
 }
 
-static inline uint32_t ade_zpse_write(int32_t s24) {
-  // Clamp to ±2^23−1
-  if (s24 > 0x7FFFFF) s24 = 0x7FFFFF;
-  if (s24 < -0x800000) s24 = -0x800000;
-  uint32_t u24 = (uint32_t)s24 & 0x00FFFFFF;
-  uint32_t signNibble = (u24 & 0x00800000) ? 0x0F000000 : 0x00000000;
-  return signNibble | u24;        // 32-bit word per 32 ZPSE spec
-}
-
-
 // Đọc 24-bit unsigned/signed
 static uint32_t ade_read_u24(uint16_t reg) {
   uint8_t b[3] = {0,0,0};
@@ -184,7 +174,7 @@ static bool wait_zx(uint16_t zx_bit, uint16_t timeout_ms) {
 }
 
 // ===== Helpers 24-bit average =====
-static double readRMS24_avg(uint16_t reg, uint16_t samples, uint16_t delay_ms_between=8) {
+static double ade_read_avg24RMS(uint16_t reg, uint16_t samples, uint16_t delay_ms_between=8) {
   double acc = 0.0;
   uint16_t ok = 0;
   for (uint16_t i=0; i<samples; i++) {
@@ -281,7 +271,7 @@ static bool tune_AVRMS_to(double V_TARGET_Vrms,
 
   for (uint8_t it = 0; it < max_iters; it++) {
     double avrms_raw = avg_AVRMS_via_zx(48, 250);
-    if (avrms_raw <= 0.0) avrms_raw = readRMS24_avg(AVRMS, avg_samples, delay_ms_between);
+    if (avrms_raw <= 0.0) avrms_raw = ade_read_avg24RMS(AVRMS, avg_samples, delay_ms_between);
 
     double V_meas    = avrms_raw * VRMS_LSB;
     if (V_meas <= 1e-12) {
@@ -338,7 +328,7 @@ static bool tune_AIRMS_to(double I_TARGET_Arms,
 
     double AIRMS_raw = avg_AIRMS_via_zx(48, 250);
     if (AIRMS_raw <= 0.0)
-      AIRMS_raw = readRMS24_avg(AIRMS, avg_samples, delay_ms_between);
+      AIRMS_raw = ade_read_avg24RMS(AIRMS, avg_samples, delay_ms_between);
 
     double I_meas = AIRMS_raw * IRMS_LSB;
     if (I_meas <= 1e-12) {
@@ -416,7 +406,7 @@ static bool tune_BIRMS_to(double I_TARGET_Arms,
 
   for (uint8_t it = 0; it < max_iters; it++) {
     double BIRMS_raw = avg_BIRMS_via_zx(48, 250);
-    if (BIRMS_raw <= 0.0) BIRMS_raw = readRMS24_avg(BIRMS, avg_samples, delay_ms_between);
+    if (BIRMS_raw <= 0.0) BIRMS_raw = ade_read_avg24RMS(BIRMS, avg_samples, delay_ms_between);
 
     double I_meas    = BIRMS_raw * IRMS_LSB;
     if (I_meas <= 1e-12) {
@@ -472,7 +462,7 @@ static void calibrate_V(double V_TEST_Vrms) {
 
   // đọc AVRMS trung bình (đồng bộ ZX nếu có)
   double avrms_raw = avg_AVRMS_via_zx(64, 250);
-  if (avrms_raw <= 0.0) avrms_raw = readRMS24_avg(AVRMS, 256, 12);
+  if (avrms_raw <= 0.0) avrms_raw = ade_read_avg24RMS(AVRMS, 256, 12);
 
   // xVGAIN (Q.23) sao cho AVRMS * (1+VGAIN) đạt mức FS_RMS_CODES * percentFS_V
   const double target_codes = (double)FS_RMS_CODES * percentFS_V;
@@ -517,7 +507,7 @@ static void calibrate_I(double I_TEST_Arms) {
   delay(300);
 
   double AIRMS_raw = avg_AIRMS_via_zx(64, 250);
-  if (AIRMS_raw <= 0.0) AIRMS_raw = readRMS24_avg(AIRMS, 64, 8);
+  if (AIRMS_raw <= 0.0) AIRMS_raw = ade_read_avg24RMS(AIRMS, 64, 8);
 
   Serial.print(F(">>> DEBUG: Raw AIRMS codes=")); Serial.println(AIRMS_raw, 1);
 

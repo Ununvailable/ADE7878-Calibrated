@@ -130,8 +130,8 @@ const uint8_t    I2C_RETRY      = 2;
 // ---- calib constants (yours) ----
 const uint32_t VLEVEL_CAL = 0x1720AF;
 const int32_t AVGAIN_CAL = 248334, AIGAIN_CAL =  -286699;
-const int32_t BVGAIN_CAL = 248334, BIGAIN_CAL =  -286699;
-const int32_t CVGAIN_CAL = 248334, CIGAIN_CAL =  -286699;
+const int32_t BVGAIN_CAL = 248334, BIGAIN_CAL =  27077;
+const int32_t CVGAIN_CAL = 248334, CIGAIN_CAL =  -78179;
 // const int32_t AVGAIN_CAL = 1, AIGAIN_CAL =  1;
 // const int32_t BVGAIN_CAL = 1, BIGAIN_CAL =  1;
 // const int32_t CVGAIN_CAL = 1, CIGAIN_CAL =  1;
@@ -215,9 +215,14 @@ static void ade_basic_config() {
 }
 static void ade_apply_calibration() {
   ade_write(VLEVEL, VLEVEL_CAL,4);
-  ade_write(AVGAIN, AVGAIN_CAL,4); ade_write(AIGAIN, AIGAIN_CAL,4);
-  ade_write(BVGAIN, BVGAIN_CAL,4); ade_write(BIGAIN, BIGAIN_CAL,4);
-  ade_write(CVGAIN, CVGAIN_CAL,4); ade_write(CIGAIN, CIGAIN_CAL,4);
+  ade_write(AIGAIN, AIGAIN_CAL,4);
+  ade_write(BIGAIN, BIGAIN_CAL,4);
+  ade_write(CIGAIN, CIGAIN_CAL,4);
+
+  ade_write(AVGAIN, AVGAIN_CAL,4); 
+  ade_write(BVGAIN, BVGAIN_CAL,4); 
+  ade_write(CVGAIN, CVGAIN_CAL,4); 
+
   ade_write(AVRMSOS,(uint32_t)AVRMSOS_CAL,3);
   ade_write(BVRMSOS,(uint32_t)BVRMSOS_CAL,3);
   ade_write(CVRMSOS,(uint32_t)CVRMSOS_CAL,3);
