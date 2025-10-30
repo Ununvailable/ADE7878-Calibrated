@@ -55,6 +55,9 @@ const double R1_OHM         = 1'000'000.0;
 const double R2_OHM         = 1'000.0;
 const double CT_RATIO       = 2000.0;
 const double BURDEN_OHM     = 200.0;
+const int64_t ZPSE_SCALE = 1LL << 23;        // 2^23
+const int32_t ZPSE_MAX   =  (int32_t)((1LL << 23) - 1); // +8,388,607
+const int32_t ZPSE_MIN   =  (int32_t)(-(1LL << 23));    // -8,388,608
 
 // PGA & ADC full-scale
 #define  V_PGA              1
@@ -180,6 +183,45 @@ static void write_gain(uint16_t gain_reg, int32_t value) {
 
 static int32_t read_gain(uint16_t gain_reg) {
   return zpse_decode(ade_read_u32(gain_reg, 4));
+}
+
+static int32_t compute_safe_gain(double target_codes, double vrms_raw) {
+  if (!isfinite(vrms_raw) || vrms_raw <= 0.0) return 0;
+  if (!isfinite(target_codes) || target_codes <= 0.0) return 0;
+
+  double ratio = target_codes / vrms_raw;        // desired multiplicative factor on raw codes
+  double gain_d = (ratio - 1.0) * (double)ZPSE_SCALE;
+
+  // Check if requested ratio is outside device capability (~[0,2) for G)
+  double max_ratio = 1.0 + ((double)ZPSE_MAX / (double)ZPSE_SCALE); // ≈ 1.99999988
+  double min_ratio = 1.0 + ((double)ZPSE_MIN / (double)ZPSE_SCALE); // ≈ 0.0
+
+  if (ratio > max_ratio) {
+    Serial.print(F("  WARNING: requested ratio "));
+    Serial.print(ratio, 6);
+    Serial.print(F(" exceeds device max ratio "));
+    Serial.println(max_ratio, 6);
+  } else if (ratio < min_ratio) {
+    Serial.print(F("  WARNING: requested ratio "));
+    Serial.print(ratio, 6);
+    Serial.print(F(" below device min ratio "));
+    Serial.println(min_ratio, 6);
+  }
+
+  // clamp safely using int64_t window
+  int64_t gain_i64;
+  if (!isfinite(gain_d)) gain_i64 = 0;
+  else if (gain_d > (double)ZPSE_MAX) gain_i64 = ZPSE_MAX;
+  else if (gain_d < (double)ZPSE_MIN) gain_i64 = ZPSE_MIN;
+  else gain_i64 = (int64_t)llround(gain_d);
+
+  // Inform if clamped
+  if ((double)gain_i64 != gain_d) {
+    Serial.print(F("  NOTE: gain value clamped to "));
+    Serial.println((long)gain_i64);
+  }
+
+  return (int32_t)gain_i64;
 }
 
 // ========= 24-bit Read Helpers =========
@@ -475,19 +517,24 @@ static void calibrate_V(PhaseConfig &ph, double V_TEST_Vrms) {
   // Calculate LSB from actual measurement
   ph.vrms_lsb = V_TEST_Vrms / max(1.0, vrms_raw);
 
+  // Calculate unamplified measurement
+  Serial.print(F("  Raw VRMS value: ")); Serial.println(vrms_raw * ph.vrms_lsb, 3);  
+
   // Calculate required gain
   double target_codes = (double)FS_RMS_CODES * percentFS_V;
-  int32_t gain_val = (int32_t)llround(((target_codes / vrms_raw) - 1.0) * 8388608.0);
+//   int32_t gain_val = (int32_t)llround(((target_codes / vrms_raw) - 1.0) * 8388608.0);
+  int32_t gain_val = compute_safe_gain(target_codes, vrms_raw);
   write_gain(ph.vgain_reg, gain_val);
 
-  Serial.print(F("  percentFS_V=")); Serial.println(percentFS_V, 6);
-  Serial.print(F("  VGAIN=")); Serial.println(gain_val);
-  Serial.print(F("  VRMS_LSB=")); Serial.println(ph.vrms_lsb, 10);
+  Serial.print(F("  VRMS_LSB calculated =")); Serial.println(ph.vrms_lsb, 10);
+  Serial.print(F("  FS_V percentage =")); Serial.println(percentFS_V, 6);
+  Serial.print(F("  VGAIN calculated =")); Serial.println(gain_val);
+  
 
   delay(300);
-//   double V_check = (double)ade_read_u24(ph.vrms_reg) * ph.vrms_lsb;
+  //  double V_check = (double)ade_read_u24(ph.vrms_reg) * ph.vrms_lsb;
   double V_check = (double)ade_read_s24(ph.vrms_reg) * ph.vrms_lsb;
-  Serial.print(F("  Initial check: ")); Serial.print(V_check, 3);
+  Serial.print(F("  Initial check (starting value, singular measurement): ")); Serial.print(V_check, 3);
   Serial.println(F(" V"));
 
   // Fine-tune

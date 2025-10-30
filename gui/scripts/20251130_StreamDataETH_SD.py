@@ -620,9 +620,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.currentTab = CurrentPlotTab()
         self.tab.addTab(self.voltageTab, "Voltages")
         self.tab.addTab(self.currentTab, "Currents")
-        # Connect signal to plots
-        # self.reader.paramFrame.connect(self.voltageTab.update_frame)
-        # self.reader.paramFrame.connect(self.currentTab.update_frame)
 
         # Root
         root = QtWidgets.QWidget(); rl = QtWidgets.QVBoxLayout(root)
@@ -669,12 +666,12 @@ class MainWindow(QtWidgets.QMainWindow):
     @QtCore.pyqtSlot(list)
     def on_params(self, vals):
         self.grid.update_values(vals)
+
+        # Connect signal to plots
         # record last timestamp for online indicator
         self._last_frame_ts = time.time()
-
         # Map the 16 parameters to names for plots
         frame_dict = dict(zip(PARAM_NAMES, vals))
-
         # Update both plot tabs
         self.voltageTab.update_frame(frame_dict)
         self.currentTab.update_frame(frame_dict)

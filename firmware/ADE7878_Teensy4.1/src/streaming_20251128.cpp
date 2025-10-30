@@ -110,39 +110,39 @@ PhaseCalibration phases[3] = {
   {
     AVRMS, AIRMS, AWATT, AVAR, AVA,
     AVGAIN, AIGAIN, AVRMSOS, AIRMSOS, ZXIA_BIT,
-    119751,    // vgain_cal - REPLACE WITH YOUR VALUE
-    -286699,   // igain_cal - REPLACE WITH YOUR VALUE
-    0,         // voffset_cal - REPLACE WITH YOUR VALUE
-    0,         // ioffset_cal - REPLACE WITH YOUR VALUE
-    8.47513E-05,   // vrms_lsb - REPLACE WITH YOUR VALUE
-    0.0000008433,  // irms_lsb - REPLACE WITH YOUR VALUE
-    0.02388575,    // watt_lsb - REPLACE WITH YOUR VALUE
+    288607,    // vgain_cal
+    -286699,   // igain_cal
+    0,         // voffset_cal
+    0,         // ioffset_cal
+    0.0217391304,   // vrms_lsb
+    0.0000008433,  // irms_lsb
+    0.02388575,    // watt_lsb
     'A'
   },
   // Phase B
   {
     BVRMS, BIRMS, BWATT, BVAR, BVA,
     BVGAIN, BIGAIN, BVRMSOS, BIRMSOS, ZXIB_BIT,
-    248334,    // vgain_cal - REPLACE WITH YOUR VALUE
-    532840,   // igain_cal - REPLACE WITH YOUR VALUE
-    0,         // voffset_cal - REPLACE WITH YOUR VALUE
-    0,         // ioffset_cal - REPLACE WITH YOUR VALUE
-    8.47513E-05,   // vrms_lsb - REPLACE WITH YOUR VALUE
-    0.0000008433,  // irms_lsb - REPLACE WITH YOUR VALUE
-    0.02388575,    // watt_lsb - REPLACE WITH YOUR VALUE
+    85588,    // vgain_cal
+    532840,   // igain_cal
+    0,         // voffset_cal
+    0,         // ioffset_cal
+    0.0222783048,   // vrms_lsb
+    0.0000008433,  // irms_lsb
+    0.02388575,    // watt_lsb
     'B'
   },
   // Phase C
   {
     CVRMS, CIRMS, CWATT, CVAR, CVA,
     CVGAIN, CIGAIN, CVRMSOS, CIRMSOS, ZXIC_BIT,  // ✓ Correct ZX bit
-    248334,    // vgain_cal - REPLACE WITH YOUR VALUE
-    -205997,   // igain_cal - REPLACE WITH YOUR VALUE
-    0,         // voffset_cal - REPLACE WITH YOUR VALUE
-    0,         // ioffset_cal - REPLACE WITH YOUR VALUE
-    8.47513E-05,   // vrms_lsb - REPLACE WITH YOUR VALUE
-    0.0000008433,  // irms_lsb - REPLACE WITH YOUR VALUE
-    0.02388575,    // watt_lsb - REPLACE WITH YOUR VALUE
+    288607,    // vgain_cal
+    -205997,   // igain_cal
+    0,         // voffset_cal
+    0,         // ioffset_cal
+    0.0217391304,   // vrms_lsb
+    0.0000008433,  // irms_lsb
+    0.02388575,    // watt_lsb
     'C'
   }
 };
@@ -507,13 +507,13 @@ void stream_frame_json() {
   int32_t watt_raw[3];
   
   for (int i = 0; i < 3; i++) {
-    vrms_raw[i] = ade_read_u32(phases[i].vrms_reg, 4);
-    irms_raw[i] = ade_read_u32(phases[i].irms_reg, 4);
-    watt_raw[i] = sign_extend_24(ade_read_u32(phases[i].watt_reg, 4));
+    // vrms_raw[i] = ade_read_u32(phases[i].vrms_reg, 4);
+    // irms_raw[i] = ade_read_u32(phases[i].irms_reg, 4);
+    // watt_raw[i] = sign_extend_24(ade_read_u32(phases[i].watt_reg, 4));
 
-    // vrms_raw[i] = ade_read_s24(phases[i].vrms_reg); 
-    // irms_raw[i] = ade_read_s24(phases[i].irms_reg); 
-    // watt_raw[i] = ade_read_s24(phases[i].watt_reg); 
+    vrms_raw[i] = ade_read_s24(phases[i].vrms_reg); 
+    irms_raw[i] = ade_read_s24(phases[i].irms_reg); 
+    watt_raw[i] = ade_read_s24(phases[i].watt_reg); 
   }
   
   double freq = read_line_freq_hz_ema();
