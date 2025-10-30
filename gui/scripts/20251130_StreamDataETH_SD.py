@@ -3,6 +3,7 @@
 
 import sys, json, time, socket, struct, threading, math
 from PyQt6 import QtWidgets, QtCore, QtGui
+import pyqtgraph as pg
 
 # TEENSY_IP   = "192.168.200.177"
 TEENSY_IP   = "169.254.153.177"
@@ -501,6 +502,64 @@ class MultimeterWidget(QtWidgets.QWidget):
         avg_v = (self.avg_sum/self.avg_n) if self.avg_n>0 else 0.0
         self.lbl_avg.setText(f"Avg: {fmt_unit(avg_v, unit)}")
 
+class BasePlotTab(QtWidgets.QWidget):
+    """Base class for voltage/current plot tabs."""
+    def __init__(self, title: str, channels: dict, parent=None):
+        super().__init__(parent)
+        layout = QtWidgets.QVBoxLayout(self)
+
+        # Style
+        pg.setConfigOptions(antialias=True, background="#1e1e1e", foreground="w")
+
+        # Create the single plot widget for all channels of this type
+        self.plot_widget = pg.PlotWidget(title=title)
+        self.plot_widget.showGrid(x=True, y=True)
+        self.plot_widget.addLegend(offset=(10, 10))
+        layout.addWidget(self.plot_widget)
+
+        # Initialize lines and data
+        self.lines = {}
+        self.history = {k: [] for k in channels}
+        self.max_points = 300
+        self.colors = channels
+
+        # Create a line per channel
+        for key, (label, color) in self.colors.items():
+            line = self.plot_widget.plot(pen=color, name=label)
+            self.lines[key] = line
+
+    def update_frame(self, frame: dict):
+        for key in self.lines:
+            if key in frame:
+                self.history[key].append(frame[key])
+                if len(self.history[key]) > self.max_points:
+                    self.history[key].pop(0)
+                xdata = range(len(self.history[key]))
+                self.lines[key].setData(xdata, self.history[key])
+
+class VoltagePlotTab(BasePlotTab):
+    def __init__(self, parent=None):
+        channels = {
+            "AVRMS": ("Phase A", "r"),
+            "BVRMS": ("Phase B", "g"),
+            "CVRMS": ("Phase C", "b"),
+        }
+        super().__init__("Voltage (RMS)", channels, parent)
+        self.plot_widget.setLabel("left", "Voltage (V)")
+        self.plot_widget.setLabel("bottom", "Samples")
+
+class CurrentPlotTab(BasePlotTab):
+    def __init__(self, parent=None):
+        channels = {
+            "AIRMS": ("Phase A", "r"),
+            "BIRMS": ("Phase B", "g"),
+            "CIRMS": ("Phase C", "b"),
+        }
+        super().__init__("Current (RMS)", channels, parent)
+        self.plot_widget.setLabel("left", "Current (A)")
+        self.plot_widget.setLabel("bottom", "Samples")
+
+
 # ------------------ Main Window ------------------
 
 class MainWindow(QtWidgets.QMainWindow):
@@ -551,9 +610,19 @@ class MainWindow(QtWidgets.QMainWindow):
         # Center: Tabs (Grid + Multimeter)
         self.tab = QtWidgets.QTabWidget()
         self.grid = ParamGrid(PARAM_NAMES)
-        self.mm   = MultimeterWidget()
+        self.mm = MultimeterWidget()
+
         self.tab.addTab(self.grid, "Grid")
         self.tab.addTab(self.mm,   "Multimeter")
+
+        # Addition: Plotting tabs
+        self.voltageTab = VoltagePlotTab()
+        self.currentTab = CurrentPlotTab()
+        self.tab.addTab(self.voltageTab, "Voltages")
+        self.tab.addTab(self.currentTab, "Currents")
+        # Connect signal to plots
+        # self.reader.paramFrame.connect(self.voltageTab.update_frame)
+        # self.reader.paramFrame.connect(self.currentTab.update_frame)
 
         # Root
         root = QtWidgets.QWidget(); rl = QtWidgets.QVBoxLayout(root)
@@ -566,6 +635,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._link_timer.start(250)
 
         self._last_frame_ts = 0.0
+
 
     def _tick_link(self):
         # coi như ONLINE nếu trong 1s gần nhất có frame
@@ -599,6 +669,15 @@ class MainWindow(QtWidgets.QMainWindow):
     @QtCore.pyqtSlot(list)
     def on_params(self, vals):
         self.grid.update_values(vals)
+        # record last timestamp for online indicator
+        self._last_frame_ts = time.time()
+
+        # Map the 16 parameters to names for plots
+        frame_dict = dict(zip(PARAM_NAMES, vals))
+
+        # Update both plot tabs
+        self.voltageTab.update_frame(frame_dict)
+        self.currentTab.update_frame(frame_dict)
 
     @QtCore.pyqtSlot(dict)
     def on_frame_json(self, d):
@@ -631,7 +710,7 @@ def main():
     # dark-ish palette cho dễ nhìn
     pal = app.palette()
     pal.setColor(QtGui.QPalette.ColorRole.Window, QtGui.QColor("#1e1e1e"))
-    pal.setColor(QtGui.QPalette.ColorRole.WindowText, QtGui.QColor("#dddddd"))
+    pal.setColor(QtGui.QPalette.ColorRole.WindowText, QtGui.QColor("#bbbbbb"))
     pal.setColor(QtGui.QPalette.ColorRole.Base, QtGui.QColor("#252526"))
     pal.setColor(QtGui.QPalette.ColorRole.AlternateBase, QtGui.QColor("#2d2d30"))
     pal.setColor(QtGui.QPalette.ColorRole.ToolTipBase, QtGui.QColor("#ffffdc"))
