@@ -52,10 +52,13 @@ const int gpioPins[] = {
 
 const int numPins = sizeof(gpioPins) / sizeof(gpioPins[0]);
 
-HardwareSerial Serial8(PE0, PE1);
+// HardwareSerial Serial8(PE0, PE1);
+HardwareSerial MySerial(USART6);
 
 void setup() {
-    Serial8.begin(9600);
+    MySerial.setRx(PG9);
+    MySerial.setTx(PG14);
+    MySerial.begin(9600);
     // Initialize all GPIO pins as outputs
     for (int i = 0; i < numPins; i++) {
         pinMode(gpioPins[i], OUTPUT);
@@ -74,6 +77,6 @@ void loop() {
     // for (int i = 0; i < numPins; i++) {
     //     digitalWrite(gpioPins[i], LOW);
     // }
-    delay(2000);  // Wait 1 second
-    Serial8.println(F("Yo"));
+    delay(2000);
+    MySerial.println(F("Yo"));
 }

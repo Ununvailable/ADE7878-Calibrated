@@ -31,6 +31,10 @@
 #define SD_PIN          12
 
 // =================== NETWORK CONFIG ===================
+// HardwareSerial Serial8(PE0, PE1);
+HardwareSerial SerialComm(USART6); 
+
+// =================== NETWORK CONFIG ===================
 byte mac[] = {0xDE, 0xAD, 0xBE, 0xEF, 0xFE, 0xED};
 IPAddress localIp(169, 254, 153, 177);
 const uint16_t LOCAL_PORT = 6000;
@@ -289,7 +293,7 @@ static void ade_apply_calibration() {
 }
 
 static void verify_calibration() {
-  Serial.println(F("\n=== Calibration Verification ==="));
+  SerialComm.println(F("\n=== Calibration Verification ==="));
   
   for (int i = 0; i < 3; i++) {
     PhaseCalibration &ph = phases[i];
@@ -299,21 +303,21 @@ static void verify_calibration() {
     uint32_t voff_rb = ade_read_u32(ph.voffset_reg, 3);
     uint32_t ioff_rb = ade_read_u32(ph.ioffset_reg, 3);
     
-    Serial.print(F("Phase ")); Serial.print(ph.name); Serial.println(F(":"));
-    Serial.print(F("  VGAIN: wrote=")); Serial.print(ph.vgain_cal);
-    Serial.print(F(" read=")); Serial.println(vgain_rb);
-    Serial.print(F("  IGAIN: wrote=")); Serial.print(ph.igain_cal);
-    Serial.print(F(" read=")); Serial.println(igain_rb);
+    SerialComm.print(F("Phase ")); SerialComm.print(ph.name); SerialComm.println(F(":"));
+    SerialComm.print(F("  VGAIN: wrote=")); SerialComm.print(ph.vgain_cal);
+    SerialComm.print(F(" read=")); SerialComm.println(vgain_rb);
+    SerialComm.print(F("  IGAIN: wrote=")); SerialComm.print(ph.igain_cal);
+    SerialComm.print(F(" read=")); SerialComm.println(igain_rb);
     
     if (vgain_rb != ph.vgain_cal) {
-      Serial.println(F("  ⚠️  VGAIN MISMATCH!"));
+      SerialComm.println(F("  ⚠️  VGAIN MISMATCH!"));
     }
     if (igain_rb != ph.igain_cal) {
-      Serial.println(F("  ⚠️  IGAIN MISMATCH!"));
+      SerialComm.println(F("  ⚠️  IGAIN MISMATCH!"));
     }
   }
   
-  Serial.println();
+  SerialComm.println();
 }
 
 // =================== FREQUENCY READING ===================
@@ -383,7 +387,7 @@ bool openLogFile() {
   if (!sdReady) {
     sdReady = SD.begin(SD_PIN);
     if (!sdReady) {
-      Serial.println(F("[SD] Init failed"));
+      SerialComm.println(F("[SD] Init failed"));
       return false;
     }
   }
@@ -394,11 +398,11 @@ bool openLogFile() {
   logFile = SD.open(fn.c_str(), FILE_WRITE);
   
   if (!logFile) {
-    Serial.println(F("[SD] File open failed"));
+    SerialComm.println(F("[SD] File open failed"));
     return false;
   }
   
-  Serial.print(F("[SD] Logging to: ")); Serial.println(fn);
+  SerialComm.print(F("[SD] Logging to: ")); SerialComm.println(fn);
   sdLinesSinceFlush = 0;
   return true;
 }
@@ -407,14 +411,14 @@ void closeLogFile() {
   if (logFile) {
     logFile.flush();
     logFile.close();
-    Serial.println(F("[SD] File closed"));
+    SerialComm.println(F("[SD] File closed"));
   }
 }
 
 // =================== NETWORK STATE MANAGEMENT ===================
 void goOffline(const char* reason) {
   if (netState != NetState::OFFLINE) {
-    Serial.print(F("[NET] -> OFFLINE: ")); Serial.println(reason);
+    SerialComm.print(F("[NET] -> OFFLINE: ")); SerialComm.println(reason);
     netState = NetState::OFFLINE;
     openLogFile();
     digitalWrite(LED_BUILTIN, HIGH);
@@ -423,7 +427,7 @@ void goOffline(const char* reason) {
 
 void goOnline() {
   if (netState != NetState::ONLINE) {
-    Serial.println(F("[NET] -> ONLINE"));
+    SerialComm.println(F("[NET] -> ONLINE"));
     closeLogFile();
     netState = NetState::ONLINE;
     digitalWrite(LED_BUILTIN, LOW);
@@ -463,10 +467,10 @@ void processUdpControl() {
     if (m >= 5 && !memcmp(buf, "HELLO", 5)) {
       remoteIp = Udp.remoteIP();
       remotePort = Udp.remotePort();
-      Serial.print(F("[ETH] HELLO from "));
-      Serial.print(remoteIp);
-      Serial.print(F(":"));
-      Serial.println(remotePort);
+      SerialComm.print(F("[ETH] HELLO from "));
+      SerialComm.print(remoteIp);
+      SerialComm.print(F(":"));
+      SerialComm.println(remotePort);
       goOnline();
       lastAckMs = millis();
     }
@@ -479,8 +483,8 @@ void processUdpControl() {
       
       if (epoch > 1500000000UL) {
         setTime(epoch);
-        Serial.print(F("[TIME] Set to epoch "));
-        Serial.println(epoch);
+        SerialComm.print(F("[TIME] Set to epoch "));
+        SerialComm.println(epoch);
       }
     }
     
@@ -603,8 +607,12 @@ void stream_frame_json() {
 
 // =================== SETUP ===================
 void setup() {
-  Serial.begin(115200);
-  while (!Serial && millis() < 3000) {}
+  SerialComm.setRx(PG9);
+  SerialComm.setTx(PG14);
+  SerialComm.begin(9600);
+  while (!SerialComm && millis() < 3000) {}
+  delay(2000);
+  SerialComm.println(F("SerialComm Okay"));
   
   pinMode(RESET_PIN, OUTPUT);
   pinMode(PM0_PIN, INPUT);
@@ -623,13 +631,13 @@ void setup() {
   
   // Verify calibration
   uint32_t ver = ade_read_u32(VERSION, 2);
-  Serial.print(F("\n{\"boot\":\"ok\",\"version\":0x"));
-  Serial.print(ver, HEX);
-  Serial.println(F("}"));
+  SerialComm.print(F("\n{\"boot\":\"ok\",\"version\":0x"));
+  SerialComm.print(ver, HEX);
+  SerialComm.println(F("}"));
   
   if (ver == 0 || ver == 0xFFFF) {
-    Serial.println(F("⚠️  ERROR: Cannot communicate with ADE7878!"));
-    Serial.println(F("Check I2C connections and address."));
+    SerialComm.println(F("⚠️  ERROR: Cannot communicate with ADE7878!"));
+    SerialComm.println(F("Check I2C connections and address."));
   } else {
     verify_calibration();
   }
@@ -639,24 +647,24 @@ void setup() {
   delay(100);
   Udp.begin(LOCAL_PORT);
   
-  Serial.print(F("[ETH] IP: "));
-  Serial.println(Ethernet.localIP());
-  Serial.println(F("[ETH] Send 'HELLO' from PC to start streaming"));
-  Serial.println(F("[ETH] Send 'TIME <epoch>' to set clock"));
+  SerialComm.print(F("[ETH] IP: "));
+  SerialComm.println(Ethernet.localIP());
+  SerialComm.println(F("[ETH] Send 'HELLO' from PC to start streaming"));
+  SerialComm.println(F("[ETH] Send 'TIME <epoch>' to set clock"));
   
   // Initialize SD card
   sdReady = SD.begin(SD_PIN);
   if (sdReady) {
-    Serial.println(F("[SD] Ready"));
+    SerialComm.println(F("[SD] Ready"));
   } else {
-    Serial.println(F("[SD] Not ready (will retry on demand)"));
+    SerialComm.println(F("[SD] Not ready (will retry on demand)"));
   }
   
   // Start in offline mode
   netState = NetState::OFFLINE;
   openLogFile();
   
-  Serial.println(F("\n=== STREAMING SYSTEM READY ===\n"));
+  SerialComm.println(F("\n=== STREAMING SYSTEM READY ===\n"));
 }
 
 // =================== MAIN LOOP ===================
