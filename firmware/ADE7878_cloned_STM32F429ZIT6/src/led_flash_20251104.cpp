@@ -11,7 +11,8 @@ const int gpioPins[] = {
     // PA8, PA9, PA10, PA11, PA12, PA13, PA14, PA15,
 
     // // Port B (PB0-PB15)
-    // PB0, PB1, PB2, PB3, PB4, PB5, PB6, PB7,
+    // PB0, PB1, PB2, PB3, PB4, PB5, 
+    PB6, PB7,
     // PB8, PB9, PB10, PB11, PB12, PB13, PB14, PB15,
 
     // // Port C (PC0-PC15)
@@ -78,5 +79,5 @@ void loop() {
     //     digitalWrite(gpioPins[i], LOW);
     // }
     delay(2000);
-    MySerial.println(F("Yo"));
+    MySerial.print(F("A"));
 }

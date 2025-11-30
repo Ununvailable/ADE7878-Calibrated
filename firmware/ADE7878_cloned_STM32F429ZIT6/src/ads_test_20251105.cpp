@@ -13,6 +13,8 @@
 #include <SD.h>
 #include <STM32Ethernet.h>
 #include <TimeLib.h>
+#include "stm32f4xx_hal.h"
+
 
 // =================== HARDWARE CONFIG ===================
 // Use SPI1 on STM32F429ZI Discovery default pins:
@@ -27,12 +29,16 @@
 #define ADS_CS_PIN      PE4
 #define ADS_DRDY_PIN    PD2
 #define ADS_SYNC_PIN    PB1
+#define ADS_CLKIN_PIN   PE3
 
 // SD card on SPI3 (or SDIO if preferred)
 #define SD_CS_PIN       PC11  // Adjust based on your board
 
 // Create SPI object
 SPIClass SPI_4(ADS_MOSI_PIN, ADS_MISO_PIN, ADS_SCK_PIN);
+
+// Local static timer handle
+static TIM_HandleTypeDef htim3;
 
 // =============== SERIAL COMMUNICATION =================
 HardwareSerial SerialComm(USART6); 
@@ -98,38 +104,33 @@ void ads_deselect() {
 // =================== ADS131M08 LOW-LEVEL I/O ===================
 
 uint16_t ads_read_register(uint16_t reg, uint8_t* data, uint8_t nbytes) {
-    // Build RREG command: 101a_aaaa_annn_nnnn
     uint16_t cmd = 0xA000 | (reg << 7) | ((nbytes - 1) & 0x7F);
     
+    // Frame 1: Send RREG command
     SPI_4.beginTransaction(adsSettings);
     ads_select();
-    
-    // Send command
     SPI_4.transfer16(cmd);
-    
-    // Send padding (10 words total for full frame)
     for (int i = 0; i < 9; i++) {
         SPI_4.transfer16(0x0000);
     }
-    
     ads_deselect();
     SPI_4.endTransaction();
     
-    // Response comes in NEXT frame
+    delayMicroseconds(10);  // Add small delay between frames
+    
+    // Frame 2: Send NULL, receive register data
     SPI_4.beginTransaction(adsSettings);
     ads_select();
-    
-    // Send NULL command
     uint16_t status = SPI_4.transfer16(CMD_NULL);
     
-    // Read response data
+    // Read response
     for (uint8_t i = 0; i < nbytes; i += 2) {
         uint16_t word = SPI_4.transfer16(0x0000);
         if (i < nbytes) data[i] = word >> 8;
         if (i + 1 < nbytes) data[i + 1] = word & 0xFF;
     }
     
-    // Padding
+    // Complete frame
     for (int i = 0; i < (8 - nbytes/2); i++) {
         SPI_4.transfer16(0x0000);
     }
@@ -254,7 +255,7 @@ void ads_init() {
     //   [1:0]  = 10b  → High-resolution mode
     
     SerialComm.println(F("[ADS] Enabling internal oscillator..."));
-    ads_write_register(ADS_CLOCK, 0xFF8E);  // Changed from 0xFF0E
+    ads_write_register(ADS_CLOCK, 0xFF0E);  // Changed from 0xFF0E
     delay(100);  // Let oscillator stabilize
     
     // Verify DRDY starts toggling
@@ -272,8 +273,22 @@ void ads_init() {
     // Verify communication
     uint8_t id_data[2];
     ads_read_register(ADS_ID, id_data, 2);
-    uint16_t id = (id_data[0] << 8) | id_data[1];
+    // uint16_t id = (id_data[0] << 8) | id_data[1];
     // uint16_t id = id_data[0] | (id_data[1]  << 8);
+
+    // Fuck this
+    SerialComm.print(F("  ID raw bytes: 0x"));
+    SerialComm.print(id_data[0], HEX);
+    SerialComm.print(" 0x");
+    SerialComm.println(id_data[1], HEX);
+
+    uint16_t id = (id_data[0] << 8) | id_data[1];
+    SerialComm.print(F("  ID (MSB first): 0x"));
+    SerialComm.println(id, HEX);
+
+    id = (id_data[1] << 8) | id_data[0];
+    SerialComm.print(F("  ID (LSB first): 0x"));
+    SerialComm.println(id, HEX);
     
     SerialComm.print(F("ADS131M08 ID: 0x"));
     SerialComm.println(id, HEX);
@@ -311,6 +326,59 @@ void ads_init() {
     
     SerialComm.println(F("ADS131M08 configured for 2kSPS"));
 }
+
+void ads_clkin_enable() {
+    // === PE3 (TIM3_CH4) -> 8.192 MHz clock output ===
+    __HAL_RCC_GPIOE_CLK_ENABLE();
+    __HAL_RCC_TIM3_CLK_ENABLE();
+
+    GPIO_InitTypeDef GPIO_InitStruct = {0};
+    GPIO_InitStruct.Pin = GPIO_PIN_7;
+    GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
+    GPIO_InitStruct.Pull = GPIO_NOPULL;
+    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_VERY_HIGH;
+    GPIO_InitStruct.Alternate = GPIO_AF2_TIM3;
+    HAL_GPIO_Init(GPIOE, &GPIO_InitStruct);
+
+    TIM_HandleTypeDef htim3;
+    htim3.Instance = TIM3;
+    htim3.Init.CounterMode = TIM_COUNTERMODE_UP;
+    htim3.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+    htim3.Init.RepetitionCounter = 0;
+
+    uint32_t timer_clk = HAL_RCC_GetPCLK1Freq();
+    if ((RCC->CFGR & RCC_CFGR_PPRE1) != RCC_CFGR_PPRE1_DIV1)
+        timer_clk *= 2;  // APB1 timer clocks double when prescaled
+
+    // uint32_t target = 8192000;
+    uint32_t target = 2;
+    uint32_t prescaler = 0;
+    uint32_t period = (timer_clk / target) - 1;
+    if (period > 0xFFFF) { // adjust if too big
+        prescaler = (period / 0xFFFF);
+        period = (timer_clk / (target * (prescaler + 1))) - 1;
+    }
+
+    htim3.Init.Prescaler = prescaler;
+    htim3.Init.Period = period;
+    HAL_TIM_PWM_Init(&htim3);
+
+    TIM_OC_InitTypeDef sConfigOC = {0};
+    sConfigOC.OCMode = TIM_OCMODE_PWM1;
+    sConfigOC.Pulse = period / 2;
+    sConfigOC.OCPolarity = TIM_OCPOLARITY_HIGH;
+    sConfigOC.OCFastMode = TIM_OCFAST_DISABLE;
+    HAL_TIM_PWM_ConfigChannel(&htim3, &sConfigOC, TIM_CHANNEL_4);
+
+    HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_4);
+
+    SerialComm.print("[CLKOUT] PE3 TIM3_CH4 @ ");
+    SerialComm.print(target);
+    SerialComm.println(" Hz active");
+    SerialComm.print("[CLKOUT] ARR="); SerialComm.println(period);
+    SerialComm.print("[CLKOUT] APB1 Timer Clock="); SerialComm.println(timer_clk);
+}
+
 
 // =================== SD CARD MANAGEMENT ===================
 
@@ -486,8 +554,37 @@ void processUdpControl() {
     }
 }
 
+extern "C" void SystemClock_Config(void) {
+    RCC_OscInitTypeDef RCC_OscInitStruct = {0};
+    RCC_ClkInitTypeDef RCC_ClkInitStruct = {0};
+
+    __HAL_RCC_PWR_CLK_ENABLE();
+    __HAL_PWR_VOLTAGESCALING_CONFIG(PWR_REGULATOR_VOLTAGE_SCALE1);
+
+    RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSE;
+    RCC_OscInitStruct.HSEState = RCC_HSE_ON;
+    RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
+    RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSE;
+    RCC_OscInitStruct.PLL.PLLM = 8;
+    RCC_OscInitStruct.PLL.PLLN = 360;
+    RCC_OscInitStruct.PLL.PLLP = RCC_PLLP_DIV2;
+    RCC_OscInitStruct.PLL.PLLQ = 7;
+    HAL_RCC_OscConfig(&RCC_OscInitStruct);
+
+    HAL_PWREx_EnableOverDrive();
+
+    RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_SYSCLK | RCC_CLOCKTYPE_HCLK | 
+                                   RCC_CLOCKTYPE_PCLK1 | RCC_CLOCKTYPE_PCLK2;
+    RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_PLLCLK;
+    RCC_ClkInitStruct.AHBCLKDivider = RCC_SYSCLK_DIV1;
+    RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV4;
+    RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV2;
+    HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_5);
+}
+
 // =================== SETUP ===================
 void setup() {
+    SystemClock_Config();
     SerialComm.setRx(PG9);
     SerialComm.setTx(PG14);
     SerialComm.begin(9600);
@@ -501,6 +598,9 @@ void setup() {
     // ============ CRITICAL: Configure CS BEFORE SPI.begin() ============
     pinMode(ADS_CS_PIN, OUTPUT);
     digitalWrite(ADS_CS_PIN, HIGH);  // Deselect initially
+
+    // Configure CLKIN
+    ads_clkin_enable();
     
     // Initialize SPI with explicit pin setup
     SPI_4.begin();
@@ -524,7 +624,7 @@ void setup() {
     SerialComm.println(F("[ADS] Hardware reset complete"));
 
     // Enable internal oscillator before any SPI register read
-    ads_write_register(ADS_CLOCK, 0xFF8E);  // bit7=1: enable internal oscillator
+    ads_write_register(ADS_CLOCK, 0xFF0E);  // bit7=1: enable internal oscillator
     delay(500);  // let oscillator stabilize
     
     // Test SPI communication with ID register
@@ -532,8 +632,22 @@ void setup() {
     
     uint8_t id_data[2];
     uint16_t status = ads_read_register(ADS_ID, id_data, 2);
-    uint16_t id = (id_data[0] << 8) | id_data[1];
+    // uint16_t id = (id_data[0] << 8) | id_data[1];
     // uint16_t id = id_data[0] | (id_data[1] << 8);
+
+    // Fuck this
+    SerialComm.print(F("  ID raw bytes: 0x"));
+    SerialComm.print(id_data[0], HEX);
+    SerialComm.print(" 0x");
+    SerialComm.println(id_data[1], HEX);
+
+    uint16_t id = (id_data[0] << 8) | id_data[1];
+    SerialComm.print(F("  ID (MSB first): 0x"));
+    SerialComm.println(id, HEX);
+
+    id = (id_data[1] << 8) | id_data[0];
+    SerialComm.print(F("  ID (LSB first): 0x"));
+    SerialComm.println(id, HEX);
     
     SerialComm.print(F("  Status: 0x"));
     SerialComm.println(status, HEX);
@@ -570,7 +684,7 @@ void setup() {
     }
     
     // Continue with rest of initialization...
-    // ads_init();
+    ads_init();
 
     // Basic comm test
     uint8_t test_data[2];
@@ -578,7 +692,7 @@ void setup() {
     SerialComm.printf("STATUS: 0x%02X%02X\n", test_data[0], test_data[1]);
 
     // Configure DRDY interrupt
-    pinMode(ADS_DRDY_PIN, INPUT_PULLUP);
+    pinMode(ADS_DRDY_PIN, INPUT);
     attachInterrupt(digitalPinToInterrupt(ADS_DRDY_PIN), DRDY_ISR, FALLING);
     
     // // Initialize Ethernet
@@ -649,29 +763,30 @@ void loop() {
                 // log_sample_to_sd();
             }
             // Print 8 channels (24-bit each = 3 bytes)
-            for (int ch = 0; ch < NUM_CHANNELS; ch++) {
-                SerialComm.print(frame.ch_data[ch]);
-                SerialComm.print(';');
-            }
+            // for (int ch = 0; ch < NUM_CHANNELS; ch++) {
+            //     SerialComm.print(frame.ch_data[ch]);
+            //     SerialComm.print(',');
+            // }
+            SerialComm.print(frame.ch_data[0]);
             SerialComm.println();
         }
     }
     
     // Print statistics every 5 seconds
-    if (millis() - last_stats > 5000) {
-        last_stats = millis();
+    // if (millis() - last_stats > 5000) {
+    //     last_stats = millis();
         
-        SerialComm.print(F("[STATS] Samples: "));
-        SerialComm.print(sample_count);
-        SerialComm.print(F(" | Rate: "));
-        SerialComm.print(sample_count / (millis() / 1000.0));
-        SerialComm.print(F(" SPS | State: "));
-        SerialComm.println(netState == NetState::ONLINE ? "ONLINE" : "OFFLINE");
-    }
+    //     SerialComm.print(F("[STATS] Samples: "));
+    //     SerialComm.print(sample_count);
+    //     SerialComm.print(F(" | Rate: "));
+    //     SerialComm.print(sample_count / (millis() / 1000.0));
+    //     SerialComm.print(F(" SPS | State: "));
+    //     SerialComm.println(netState == NetState::ONLINE ? "ONLINE" : "OFFLINE");
+    // }
 
-    if (millis() - last_check > 1000) {
-        SerialComm.printf("Rate: %lu SPS\n", sample_count - last_count);
-        last_count = sample_count;
-        last_check = millis();
-    }
+    // if (millis() - last_check > 1000) {
+    //     SerialComm.printf("Rate: %lu SPS\n", sample_count - last_count);
+    //     last_count = sample_count;
+    //     last_check = millis();
+    // }
 }
